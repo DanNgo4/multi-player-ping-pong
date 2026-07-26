@@ -53,6 +53,11 @@ export interface GameState {
   winner: PlayerIndex | null;
   /** Which side serves the next ball. */
   server: PlayerIndex;
+  /**
+   * How many times each side has served; the serving seat within a side
+   * rotates on it, so teammates in a duo take turns serving.
+   */
+  serveTurns: [number, number];
   /** Seconds until the held ball is served; only meaningful while live is false. */
   serveTimer: number;
   /** True while the ball is in flight. */
@@ -73,6 +78,7 @@ export function createInitialState(): GameState {
     countdown: 0,
     winner: null,
     server: 0,
+    serveTurns: [0, 0],
     serveTimer: 0,
     live: false,
     lastHitter: null,

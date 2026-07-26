@@ -35,7 +35,7 @@ import {
   type ServerMessage,
 } from "@/lib/protocol";
 
-const CANVAS_W = 1000;
+const CANVAS_W = 1200;
 const CANVAS_H = 500;
 /** Canvas backing store is rendered at 2x for crispness on hidpi/mobile. */
 const DPR = 2;
@@ -53,6 +53,46 @@ const SNAP_DISTANCE = 200;
 const MAX_CHAT_LINES = 50;
 /** How long a ball position lingers in the motion trail. */
 const TRAIL_MS = 280;
+
+const CONFETTI_COLORS = ["#ffd166", "#ef476f", "#06d6a0", "#118ab2", "#f3f5f9"];
+const CONFETTI_COUNT = 90;
+
+interface ConfettiBit {
+  x: number;
+  y: number;
+  vy: number;
+  sway: number;
+  phase: number;
+  size: number;
+  color: string;
+}
+
+/** Runs the win-screen confetti rain; clears itself when the game isn't over. */
+function updateConfetti(bits: ConfettiBit[], dt: number, active: boolean): void {
+  if (!active) {
+    bits.length = 0;
+    return;
+  }
+  while (bits.length < CONFETTI_COUNT) {
+    bits.push({
+      x: Math.random() * CANVAS_W,
+      y: -20 - Math.random() * CANVAS_H,
+      vy: 130 + Math.random() * 170,
+      sway: 20 + Math.random() * 30,
+      phase: Math.random() * Math.PI * 2,
+      size: 4 + Math.random() * 5,
+      color: CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)]!,
+    });
+  }
+  for (const bit of bits) {
+    bit.y += bit.vy * dt;
+    bit.phase += dt * 3;
+    if (bit.y > CANVAS_H + 20) {
+      bit.y = -20;
+      bit.x = Math.random() * CANVAS_W;
+    }
+  }
+}
 
 interface TrailPoint {
   x: number;
@@ -342,12 +382,17 @@ export default function GameClient({ room, intent }: Props) {
     if (!ctx) return;
     let raf = 0;
     const trail: TrailPoint[] = [];
+    const confetti: ConfettiBit[] = [];
+    let lastNow = performance.now();
     const draw = () => {
       const viewerSide = sideRef.current ?? viewEndRef.current;
       const localRacket = roleRef.current === "player" ? racketRef.current : null;
       const now = performance.now();
+      const dt = Math.min((now - lastNow) / 1000, 0.1);
+      lastNow = now;
       const view = interpolate(prevSnapRef.current, curSnapRef.current, now);
       updateTrail(trail, view, now);
+      updateConfetti(confetti, dt, view.status === "gameover" && view.winner !== null);
       drawFrame(
         ctx,
         view,
@@ -357,6 +402,7 @@ export default function GameClient({ room, intent }: Props) {
         localRacket,
         trail,
         now,
+        confetti,
       );
       raf = requestAnimationFrame(draw);
     };
@@ -426,7 +472,7 @@ export default function GameClient({ room, intent }: Props) {
           </span>
         </div>
         <span data-testid="status" className="status">
-          {statusLabel(status, winner, side)}
+          {statusLabel(status, winner, side, scores, teamLabel)}
         </span>
         <span data-testid="presence" className="presence">
           {counts.players}/{MAX_PLAYERS} players · {counts.spectators} watching
@@ -530,6 +576,8 @@ function statusLabel(
   status: MatchStatus,
   winner: PlayerIndex | null,
   side: PlayerIndex | null,
+  scores: [number, number],
+  teamName: (t: PlayerIndex) => string,
 ): string {
   switch (status) {
     case "waiting":
@@ -537,6 +585,13 @@ function statusLabel(
     case "countdown":
       return "Get ready...";
     case "playing":
+      // From 10-10 it's deuce: winning needs a two-point margin.
+      if (scores[0] >= 10 && scores[1] >= 10) {
+        if (scores[0] === scores[1]) return "Deuce";
+        if (Math.abs(scores[0] - scores[1]) === 1) {
+          return `Advantage ${teamName(scores[0] > scores[1] ? 0 : 1)}`;
+        }
+      }
       return "";
     case "gameover":
       if (winner === null) return "Game over";
@@ -554,6 +609,7 @@ function drawFrame(
   localRacket: Racket | null,
   trail: readonly TrailPoint[] = [],
   now = 0,
+  confetti: readonly ConfettiBit[] = [],
 ): void {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   const flip = viewerSide === 1;
@@ -687,6 +743,32 @@ function drawFrame(
     ctx.font = "bold 72px system-ui";
     ctx.textAlign = "center";
     ctx.fillText(String(Math.ceil(state.countdown)), CX, 200);
+  }
+
+  // Win celebration: confetti rain and a pulsing winner banner.
+  if (state.status === "gameover" && state.winner !== null) {
+    for (const bit of confetti) {
+      ctx.save();
+      ctx.translate(bit.x + Math.sin(bit.phase) * bit.sway, bit.y);
+      ctx.rotate(bit.phase);
+      ctx.fillStyle = bit.color;
+      ctx.fillRect(-bit.size / 2, -bit.size / 4, bit.size, bit.size / 2);
+      ctx.restore();
+    }
+    const members = state.seats
+      .map((seat, i) =>
+        seat.side === state.winner ? (names[i] ?? `Player ${i + 1}`) : null,
+      )
+      .filter((n): n is string => n !== null);
+    const label = members.length > 0 ? members.join(" & ") : `Team ${state.winner + 1}`;
+    const pulse = 1 + 0.06 * Math.sin(now / 180);
+    ctx.textAlign = "center";
+    ctx.font = `bold ${Math.round(58 * pulse)}px system-ui`;
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = "rgba(6, 10, 20, 0.75)";
+    ctx.strokeText(`${label} WINS!`, CX, 210);
+    ctx.fillStyle = "#ffd166";
+    ctx.fillText(`${label} WINS!`, CX, 210);
   }
 }
 

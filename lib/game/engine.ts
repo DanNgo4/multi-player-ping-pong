@@ -110,6 +110,7 @@ export function resetScores(state: GameState): void {
   state.scores = [0, 0];
   state.winner = null;
   state.server = 0;
+  state.serveTurns = [0, 0];
   suspendPlay(state);
 }
 
@@ -271,7 +272,10 @@ export function step(
 }
 
 function servingSeat(state: GameState): Seat | null {
-  return state.seats.find((s) => s.side === state.server) ?? null;
+  const mates = state.seats.filter((s) => s.side === state.server);
+  if (mates.length === 0) return null;
+  // Teammates take turns: the side's serve count picks the seat.
+  return mates[state.serveTurns[state.server] % mates.length] ?? null;
 }
 
 function shoot(state: GameState, seat: Seat, contactOffsetX: number, rand: Rand): void {
@@ -304,7 +308,8 @@ function resolveDead(state: GameState): void {
 
 function awardPoint(state: GameState, to: PlayerIndex): void {
   state.scores[to] += 1;
-  if (state.scores[to] >= WIN_SCORE) {
+  // Win at 11, but from deuce (10-10) a two-point margin is required.
+  if (state.scores[to] >= WIN_SCORE && state.scores[to] - state.scores[opponent(to)] >= 2) {
     state.status = "gameover";
     state.winner = to;
     state.live = false;
@@ -323,6 +328,8 @@ function prepareServe(state: GameState): void {
   state.lastHitter = null;
   state.bouncedSinceHit = false;
   state.netTouched = false;
+  // Another serve for this side: its duo (if any) rotates the server.
+  state.serveTurns[state.server] += 1;
   holdBall(state);
 }
 

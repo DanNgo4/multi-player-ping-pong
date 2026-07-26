@@ -386,6 +386,50 @@ describe("scoring", () => {
     expect(state.winner).toBe(0);
     expect(state.live).toBe(false);
   });
+
+  // Awards a point to `to` by flying the ball dead past the loser's plane.
+  const scoreFor = (state: GameState, to: 0 | 1): void => {
+    state.status = "playing";
+    state.live = true;
+    state.lastHitter = to;
+    state.bouncedSinceHit = true;
+    state.ball.z = to === 0 ? PLAYER_Z[1] + MISS_MARGIN + 1 : PLAYER_Z[0] - MISS_MARGIN - 1;
+    state.ball.y = 60;
+    state.ball.vy = 0;
+    state.ball.vz = to === 0 ? SHOT_SPEED_Z : -SHOT_SPEED_Z;
+    step(state, TICK);
+  };
+
+  it("deuce: 11-10 does not end the game, a two-point margin does", () => {
+    const state = liveState();
+    state.scores = [10, 10];
+    scoreFor(state, 0);
+    expect(state.scores).toEqual([11, 10]);
+    expect(state.status).toBe("playing");
+    scoreFor(state, 0);
+    expect(state.scores).toEqual([12, 10]);
+    expect(state.status).toBe("gameover");
+    expect(state.winner).toBe(0);
+  });
+
+  it("rotates the serve between teammates on a duo side", () => {
+    const state = liveState();
+    addSeat(state, 0, "a2");
+    const first = state.seats[0]!;
+    const second = state.seats.find((s) => s.id === "a2")!;
+    first.racket.x = -75;
+    second.racket.x = 75;
+    // Side 1 scores twice; side 0 serves both times, alternating players.
+    scoreFor(state, 1);
+    expect(state.server).toBe(0);
+    step(state, TICK);
+    const firstServeX = state.ball.x;
+    state.serveTimer = 10;
+    scoreFor(state, 1);
+    step(state, TICK);
+    const secondServeX = state.ball.x;
+    expect([firstServeX, secondServeX].sort()).toEqual([-75, 75]);
+  });
 });
 
 describe("spin", () => {
