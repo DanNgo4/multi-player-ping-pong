@@ -38,6 +38,7 @@ import {
 import {
   MAX_PLAYERS,
   MAX_SEATS_PER_SIDE,
+  type Ball,
   type GameState,
   type PlayerIndex,
   type Seat,
@@ -66,7 +67,13 @@ export function addSeat(state: GameState, side: PlayerIndex, id: string): Seat |
   // Start away from an existing teammate so rackets don't stack.
   const first = teammates[0];
   const x = first === undefined ? 0 : first.racket.x <= 0 ? TABLE_WIDTH / 4 : -TABLE_WIDTH / 4;
-  const seat: Seat = { id, side, racket: { x, y: HIT_HEIGHT }, vel: { x: 0, y: 0 } };
+  const seat: Seat = {
+    id,
+    side,
+    racket: { x, y: HIT_HEIGHT },
+    vel: { x: 0, y: 0 },
+    lagTicks: 0,
+  };
   state.seats.push(seat);
   return seat;
 }
@@ -106,8 +113,20 @@ export function resetScores(state: GameState): void {
   suspendPlay(state);
 }
 
-/** Advances the match by dt seconds. Mutates and returns the same state object. */
-export function step(state: GameState, dt: number, rand: Rand = () => 0.5): GameState {
+/**
+ * Advances the match by dt seconds. Mutates and returns the same state object.
+ *
+ * `ballTrail` is the recent history of ball positions (index 0 = one tick
+ * ago), used for lag compensation: a seat with lagTicks > 0 gets its hit
+ * checks run against the ball where it was when that player's screen showed
+ * it, so high-ping players hit what they actually saw.
+ */
+export function step(
+  state: GameState,
+  dt: number,
+  rand: Rand = () => 0.5,
+  ballTrail: readonly Ball[] = [],
+): GameState {
   if (state.status === "countdown") {
     state.countdown -= dt;
     if (state.countdown <= 0) {
@@ -201,13 +220,16 @@ export function step(state: GameState, dt: number, rand: Rand = () => 0.5): Game
     }
   }
 
-  // Racket hits: any seat on the side the ball is heading toward may return it.
+  // Racket hits: any seat on the side the ball is heading toward may return
+  // it. A lagged seat probes the ball where it was lagTicks ago instead.
   for (const seat of state.seats) {
+    const lag = Math.min(seat.lagTicks, ballTrail.length);
+    const probe = lag > 0 ? (ballTrail[lag - 1] ?? ball) : ball;
     const plane = PLAYER_Z[seat.side];
-    const toward = seat.side === 0 ? ball.vz < 0 : ball.vz > 0;
-    if (!toward || Math.abs(ball.z - plane) > HIT_DEPTH) continue;
-    const dx = ball.x - seat.racket.x;
-    const dy = ball.y - seat.racket.y;
+    const toward = seat.side === 0 ? probe.vz < 0 : probe.vz > 0;
+    if (!toward || Math.abs(probe.z - plane) > HIT_DEPTH) continue;
+    const dx = probe.x - seat.racket.x;
+    const dy = probe.y - seat.racket.y;
     // Elliptical hit region: full reach sideways and above the blade centre,
     // short reach below it — the handle doesn't return balls.
     const vertReach = dy < 0 ? HIT_RADIUS_BELOW : HIT_RADIUS;
@@ -217,6 +239,9 @@ export function step(state: GameState, dt: number, rand: Rand = () => 0.5): Game
     ) {
       continue;
     }
+    // The return leaves from where this player saw the ball.
+    ball.x = probe.x;
+    ball.y = probe.y;
     ball.z = plane + (seat.side === 0 ? 10 : -10);
     shoot(state, seat, dx, rand);
     state.lastHitter = seat.side;
@@ -224,11 +249,20 @@ export function step(state: GameState, dt: number, rand: Rand = () => 0.5): Game
     break;
   }
 
-  // Dead ball: fell below the table, or flew past a racket plane.
+  // Dead ball: fell below the table, or flew past a racket plane. A side with
+  // a lagged player keeps a grace window past its plane — the ball isn't ruled
+  // dead while a compensated hit could still legitimately connect.
+  const grace = (side: PlayerIndex): number => {
+    let ticks = 0;
+    for (const seat of state.seats) {
+      if (seat.side === side) ticks = Math.max(ticks, seat.lagTicks);
+    }
+    return ticks * dt * Math.abs(ball.vz);
+  };
   if (
     ball.y < FLOOR_Y ||
-    ball.z < PLAYER_Z[0] - MISS_MARGIN ||
-    ball.z > PLAYER_Z[1] + MISS_MARGIN
+    ball.z < PLAYER_Z[0] - MISS_MARGIN - grace(0) ||
+    ball.z > PLAYER_Z[1] + MISS_MARGIN + grace(1)
   ) {
     resolveDead(state);
   }

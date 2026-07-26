@@ -18,8 +18,12 @@ export type ClientMessage =
   | { type: "join"; side: PlayerIndex }
   /** A player gives up their seat to watch. Refused mid-game in a 1v1. */
   | { type: "spectate" }
-  /** Latency probe; the server echoes t back in a pong. */
-  | { type: "ping"; t: number };
+  /**
+   * Latency probe; the server echoes t back in a pong. `rtt` is the client's
+   * last measured round-trip in ms — it feeds lag compensation (server caps
+   * it, so inflating it buys at most a small fixed advantage).
+   */
+  | { type: "ping"; t: number; rtt?: number };
 
 /** Who is at the table, for HUD display; parallel to GameState.seats. */
 export interface SeatInfo {
@@ -99,7 +103,11 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (msg.type === "chat" && typeof msg.text === "string") return msg;
     if (msg.type === "join" && (msg.side === 0 || msg.side === 1)) return msg;
     if (msg.type === "spectate") return msg;
-    if (msg.type === "ping" && Number.isFinite(msg.t)) return msg;
+    if (msg.type === "ping" && Number.isFinite(msg.t)) {
+      return msg.rtt !== undefined && !Number.isFinite(msg.rtt)
+        ? { type: "ping", t: msg.t }
+        : msg;
+    }
     return null;
   } catch {
     return null;

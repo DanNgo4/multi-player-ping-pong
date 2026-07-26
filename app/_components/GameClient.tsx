@@ -51,6 +51,28 @@ const CY = 96;
 /** If the ball moved further than this between snapshots it teleported (serve reset). */
 const SNAP_DISTANCE = 200;
 const MAX_CHAT_LINES = 50;
+/** How long a ball position lingers in the motion trail. */
+const TRAIL_MS = 280;
+
+interface TrailPoint {
+  x: number;
+  y: number;
+  z: number;
+  at: number;
+}
+
+/** Records the ball's rendered position into a fading motion trail. */
+function updateTrail(trail: TrailPoint[], state: GameState, now: number): void {
+  if (state.status !== "playing" || !state.live) {
+    trail.length = 0;
+    return;
+  }
+  const last = trail[trail.length - 1];
+  // A teleport (serve reset, lag-compensated hit) breaks the trail.
+  if (last && Math.abs(state.ball.z - last.z) > SNAP_DISTANCE) trail.length = 0;
+  trail.push({ x: state.ball.x, y: state.ball.y, z: state.ball.z, at: now });
+  while (trail.length > 0 && now - trail[0]!.at > TRAIL_MS) trail.shift();
+}
 
 const NEAR_COLORS = ["#e33d2e", "#f2913d"];
 const FAR_COLORS = ["#3f6cf0", "#7fa4ff"];
@@ -165,6 +187,7 @@ export default function GameClient({ room, intent }: Props) {
   const [winner, setWinner] = useState<PlayerIndex | null>(null);
   const [counts, setCounts] = useState({ players: 0, spectators: 0 });
   const [rtt, setRtt] = useState<number | null>(null);
+  const rttRef = useRef<number | null>(null);
   const [seatMeta, setSeatMeta] = useState<SeatInfo[]>([]);
   const [watchers, setWatchers] = useState<string[]>([]);
   const [creator, setCreator] = useState<string | null>(null);
@@ -216,7 +239,9 @@ export default function GameClient({ room, intent }: Props) {
         );
         applyMeta(msg.seats, msg.watchers, msg.creator);
       } else if (msg.type === "pong") {
-        setRtt(pingMs(msg.t));
+        const measured = pingMs(msg.t);
+        rttRef.current = measured;
+        setRtt(measured);
       } else if (msg.type === "chat") {
         setChatLog((prev) => [...prev.slice(-(MAX_CHAT_LINES - 1)), msg]);
       }
@@ -248,8 +273,12 @@ export default function GameClient({ room, intent }: Props) {
   );
 
   // Latency probe so "is it me or the server?" is answerable from the HUD.
+  // The measured rtt rides along so the server can lag-compensate our hits.
   useEffect(() => {
-    const probe = setInterval(() => sendMessage({ type: "ping", t: Date.now() }), 2000);
+    const probe = setInterval(() => {
+      const last = rttRef.current;
+      sendMessage({ type: "ping", t: Date.now(), ...(last !== null ? { rtt: last } : {}) });
+    }, 2000);
     return () => clearInterval(probe);
   }, [sendMessage]);
 
@@ -292,16 +321,22 @@ export default function GameClient({ room, intent }: Props) {
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) return;
     let raf = 0;
+    const trail: TrailPoint[] = [];
     const draw = () => {
       const viewerSide = sideRef.current ?? viewEndRef.current;
       const localRacket = roleRef.current === "player" ? racketRef.current : null;
+      const now = performance.now();
+      const view = interpolate(prevSnapRef.current, curSnapRef.current, now);
+      updateTrail(trail, view, now);
       drawFrame(
         ctx,
-        interpolate(prevSnapRef.current, curSnapRef.current, performance.now()),
+        view,
         namesRef.current,
         viewerSide,
         seatIdRef.current,
         localRacket,
+        trail,
+        now,
       );
       raf = requestAnimationFrame(draw);
     };
@@ -497,6 +532,8 @@ function drawFrame(
   viewerSide: PlayerIndex,
   mySeatId: string | null,
   localRacket: Racket | null,
+  trail: readonly TrailPoint[] = [],
+  now = 0,
 ): void {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   const flip = viewerSide === 1;
@@ -585,6 +622,22 @@ function drawFrame(
       Math.PI * 2,
     );
     ctx.fill();
+
+    // Motion trail: recent positions fade and shrink behind the ball.
+    for (const point of trail) {
+      const age = Math.min((now - point.at) / TRAIL_MS, 1);
+      const p = project(point.x, point.y, point.z, flip);
+      ctx.fillStyle = `rgba(255, 211, 77, ${(0.35 * (1 - age)).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(
+        p.x,
+        p.y,
+        Math.max(1.5, BALL_RADIUS * p.scale * 1.2 * (1 - age * 0.6)),
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
 
     const ball = project(state.ball.x, state.ball.y, state.ball.z, flip);
     ctx.fillStyle = "#ffd34d";

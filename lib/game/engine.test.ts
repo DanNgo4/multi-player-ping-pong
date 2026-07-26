@@ -252,6 +252,55 @@ describe("racket hits", () => {
     expect(state.ball.vz).toBe(SHOT_SPEED_Z);
   });
 
+  it("lag compensation: a lagged seat hits the ball where it saw it", () => {
+    const state = liveState();
+    state.lastHitter = 1;
+    // The ball has already flown past the hit window at the server's clock...
+    state.ball.x = 0;
+    state.ball.y = 60;
+    state.ball.z = PLAYER_Z[0] - 28;
+    state.ball.vz = -SHOT_SPEED_Z;
+    state.seats[0]!.racket = { x: 0, y: 60 };
+    state.seats[0]!.lagTicks = 2;
+    // ...but two ticks ago it was right on the racket.
+    const past = { ...state.ball, z: PLAYER_Z[0] };
+    const trail = [{ ...state.ball, z: PLAYER_Z[0] - 18 }, past];
+    step(state, TICK, () => 0.5, trail);
+    expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+    expect(state.lastHitter).toBe(0);
+  });
+
+  it("no compensation without lagTicks: the same late swing misses", () => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.ball.x = 0;
+    state.ball.y = 60;
+    state.ball.z = PLAYER_Z[0] - 28;
+    state.ball.vz = -SHOT_SPEED_Z;
+    state.seats[0]!.racket = { x: 0, y: 60 };
+    const trail = [
+      { ...state.ball, z: PLAYER_Z[0] - 18 },
+      { ...state.ball, z: PLAYER_Z[0] },
+    ];
+    step(state, TICK, () => 0.5, trail);
+    expect(state.ball.vz).toBe(-SHOT_SPEED_Z);
+  });
+
+  it("keeps the ball alive past the plane while a lagged hit could connect", () => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.bouncedSinceHit = true;
+    state.ball.z = PLAYER_Z[0] - MISS_MARGIN - 30;
+    state.ball.y = 60;
+    state.ball.vz = -SHOT_SPEED_Z;
+    state.seats[0]!.lagTicks = 8;
+    step(state, TICK);
+    expect(state.scores).toEqual([0, 0]);
+    state.seats[0]!.lagTicks = 0;
+    step(state, TICK);
+    expect(state.scores).toEqual([0, 1]);
+  });
+
   it("lets a teammate cover the return in a two-seat side", () => {
     const state = liveState();
     addSeat(state, 0, "a2");

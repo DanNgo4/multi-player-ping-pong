@@ -35,6 +35,12 @@ export interface Seat {
   racket: Racket;
   /** Racket velocity (units/s), tracked server-side from input deltas; feeds spin. */
   vel: Racket;
+  /**
+   * Lag compensation: how many ticks into the past this player's hit checks
+   * look, matching what their screen showed when they reacted. Set from their
+   * measured ping; 0 for low-latency players.
+   */
+  lagTicks: number;
 }
 
 export interface GameState {

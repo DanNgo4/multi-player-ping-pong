@@ -4,7 +4,13 @@ import {
   type Connection,
   type ConnectionContext,
 } from "partyserver";
-import { MAX_RACKET_SPEED, RACKET_MAX_X, RACKET_MAX_Y, TICK_HZ } from "../lib/game/constants";
+import {
+  MAX_LAG_TICKS,
+  MAX_RACKET_SPEED,
+  RACKET_MAX_X,
+  RACKET_MAX_Y,
+  TICK_HZ,
+} from "../lib/game/constants";
 import {
   addSeat,
   beginCountdown,
@@ -16,7 +22,13 @@ import {
   step,
   suspendPlay,
 } from "../lib/game/engine";
-import { createInitialState, type GameState, type PlayerIndex, type Seat } from "../lib/game/types";
+import {
+  createInitialState,
+  type Ball,
+  type GameState,
+  type PlayerIndex,
+  type Seat,
+} from "../lib/game/types";
 import {
   matchTitle,
   parseClientMessage,
@@ -51,6 +63,8 @@ export class MatchServer extends Server<Env> {
   /** Last broadcast payloads, so identical ticks aren't resent (idle rooms). */
   lastStateJson = "";
   lastMetaJson = "";
+  /** Recent ball positions (index 0 = one tick ago) for lag-compensated hits. */
+  ballTrail: Ball[] = [];
 
   /**
    * The base class holds env, but its type lives in the `cloudflare:workers`
@@ -91,6 +105,15 @@ export class MatchServer extends Server<Env> {
     if (msg.type === "ping") {
       const pong: ServerMessage = { type: "pong", t: msg.t };
       conn.send(JSON.stringify(pong));
+      // The reported round-trip sets this player's lag compensation window,
+      // capped so a dishonest client can't buy more than MAX_LAG_TICKS.
+      if (msg.rtt !== undefined) {
+        const pingSeat = this.state.seats.find((s) => s.id === conn.id);
+        if (pingSeat) {
+          const oneWaySec = Math.max(0, msg.rtt) / 2 / 1000;
+          pingSeat.lagTicks = Math.min(Math.round(oneWaySec * TICK_HZ), MAX_LAG_TICKS);
+        }
+      }
       return;
     }
     if (msg.type === "chat") {
@@ -236,7 +259,15 @@ export class MatchServer extends Server<Env> {
   private tick(): void {
     const before = `${this.state.scores[0]}:${this.state.scores[1]}:${this.state.status}`;
     const wasOver = this.state.status === "gameover";
-    step(this.state, 1 / TICK_HZ, Math.random);
+    // The trail only tracks a ball in flight; stale positions from a previous
+    // rally must never satisfy a compensated hit check.
+    if (this.state.live) {
+      this.ballTrail.unshift({ ...this.state.ball });
+      if (this.ballTrail.length > MAX_LAG_TICKS) this.ballTrail.pop();
+    } else if (this.ballTrail.length > 0) {
+      this.ballTrail = [];
+    }
+    step(this.state, 1 / TICK_HZ, Math.random, this.ballTrail);
     this.broadcastState();
     const after = `${this.state.scores[0]}:${this.state.scores[1]}:${this.state.status}`;
     if (before !== after) void this.updateLobby();

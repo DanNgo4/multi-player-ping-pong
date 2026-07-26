@@ -68,4 +68,6 @@ export const RACKET_MAX_Y = 260;
 
 export const WIN_SCORE = 11;
 export const TICK_HZ = 30;
+/** Lag compensation cap: hit checks may look at most this many ticks back. */
+export const MAX_LAG_TICKS = 8;
 export const COUNTDOWN_SECONDS = 3;
