@@ -29,8 +29,12 @@ export const HIT_RADIUS = 48;
 export const HIT_HEIGHT = 40;
 
 /** Shot profile: chosen so a return clears the net and bounces on the far side. */
-export const SHOT_SPEED_Z = 480;
+export const SHOT_SPEED_Z = 540;
 export const SHOT_LIFT = 300;
+/** Max extra forward speed (as a fraction) a full-speed swipe adds to a return. */
+export const POWER_BOOST = 0.5;
+/** Topspin launches flatter, backspin floatier: vy shifts by this per unit of spin. */
+export const SPIN_LIFT_TILT = 0.08;
 /** Lateral speed per unit of contact offset from the racket centre. */
 export const AIM_FACTOR = 3.5;
 export const MAX_SIDE_SPEED = 240;
@@ -44,9 +48,9 @@ export const MAX_SPIN = 420;
 /** Lateral acceleration per unit of side spin, applied along travel direction. */
 export const MAGNUS_SIDE = 1.5;
 /** Extra downward acceleration per unit of topspin. */
-export const MAGNUS_TOP = 1.6;
+export const MAGNUS_TOP = 1.4;
 /** Forward speed gained per unit of topspin when the ball bites the table. */
-export const SPIN_BOUNCE_KICK = 0.35;
+export const SPIN_BOUNCE_KICK = 0.4;
 export const SPIN_DECAY_ON_BOUNCE = 0.55;
 /** 1/s; how fast tracked racket velocity fades between input messages. */
 export const RACKET_VEL_DECAY = 5;

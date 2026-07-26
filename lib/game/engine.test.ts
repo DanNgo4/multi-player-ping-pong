@@ -306,6 +306,37 @@ describe("spin", () => {
     expect(state.ball.spinTop).toBeLessThan(200);
   });
 
+  it("adds shot power from a fast swipe", () => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.ball.x = 20;
+    state.ball.y = 50;
+    state.ball.z = PLAYER_Z[0] + 20;
+    state.ball.vz = -SHOT_SPEED_Z;
+    state.seats[0]!.racket = { x: 25, y: 55 };
+    state.seats[0]!.vel = { x: 0, y: 900 };
+    step(state, TICK);
+    expect(state.lastHitter).toBe(0);
+    expect(state.ball.vz).toBeGreaterThan(SHOT_SPEED_Z);
+  });
+
+  it("launches flatter with topspin and floatier with backspin", () => {
+    const hit = (velY: number): number => {
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.x = 20;
+      state.ball.y = 50;
+      state.ball.z = PLAYER_Z[0] + 20;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.seats[0]!.racket = { x: 25, y: 55 };
+      state.seats[0]!.vel = { x: 0, y: velY };
+      step(state, TICK);
+      return state.ball.vy;
+    };
+    expect(hit(700)).toBeLessThan(hit(0));
+    expect(hit(-700)).toBeGreaterThan(hit(0));
+  });
+
   it("fades tracked racket velocity over time", () => {
     const state = liveState();
     state.ball.y = 200;
@@ -338,6 +369,24 @@ describe("mid-match join and leave", () => {
     expect(state.scores).toEqual([0, 0]);
     expect(state.winner).toBeNull();
     expect(state.seats).toHaveLength(2);
+  });
+});
+
+describe("shot viability", () => {
+  it("a hard topspin return clears the net and bounces on the receiving side", () => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.ball.x = 0;
+    state.ball.y = 60;
+    state.ball.z = PLAYER_Z[0] + 20;
+    state.ball.vz = -SHOT_SPEED_Z;
+    state.seats[0]!.racket = { x: 0, y: 60 };
+    state.seats[0]!.vel = { x: 0, y: 600 };
+    for (let t = 0; t < 2 && !state.bouncedSinceHit && state.scores[1] === 0; t += TICK) {
+      step(state, TICK, () => 0.5);
+    }
+    expect(state.scores).toEqual([0, 0]);
+    expect(state.bouncedSinceHit).toBe(true);
   });
 });
 

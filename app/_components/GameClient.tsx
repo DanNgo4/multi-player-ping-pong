@@ -411,7 +411,10 @@ export default function GameClient({ room, intent }: Props) {
             ) : null}
           </div>
           {role === "player" ? (
-            <p className="hint">Move your racket with mouse or touch — a fast swipe adds spin</p>
+            <p className="hint">
+              Move your racket with mouse or touch — a fast swipe adds power, swipe up
+              for topspin, chop down for backspin, sideways to curve it
+            </p>
           ) : null}
         </div>
         <aside className="chat">

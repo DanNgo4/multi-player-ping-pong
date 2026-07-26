@@ -9,6 +9,7 @@ import {
   HIT_RADIUS,
   MAGNUS_SIDE,
   MAGNUS_TOP,
+  MAX_RACKET_SPEED,
   MAX_SIDE_SPEED,
   MAX_SPIN,
   MISS_MARGIN,
@@ -17,6 +18,7 @@ import {
   NET_RESTITUTION,
   NET_Z,
   PLAYER_Z,
+  POWER_BOOST,
   RACKET_VEL_DECAY,
   SERVE_DELAY,
   SHOT_LIFT,
@@ -24,6 +26,7 @@ import {
   SPIN_BOUNCE_KICK,
   SPIN_DECAY_ON_BOUNCE,
   SPIN_FACTOR,
+  SPIN_LIFT_TILT,
   TABLE_LENGTH,
   TABLE_RESTITUTION,
   TABLE_WIDTH,
@@ -221,15 +224,19 @@ function servingSeat(state: GameState): Seat | null {
 
 function shoot(state: GameState, seat: Seat, contactOffsetX: number, rand: Rand): void {
   const dir = seat.side === 0 ? 1 : -1;
-  state.ball.vz = SHOT_SPEED_Z * dir;
-  state.ball.vy = SHOT_LIFT;
+  // A moving racket brushes spin onto the ball: lateral movement gives side
+  // spin, upward movement gives topspin (downward chop gives backspin) —
+  // and overall swipe speed adds raw shot power.
+  const swipe = Math.min(Math.hypot(seat.vel.x, seat.vel.y) / MAX_RACKET_SPEED, 1);
+  const spinTop = clamp(seat.vel.y * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
+  state.ball.vz = SHOT_SPEED_Z * dir * (1 + swipe * POWER_BOOST);
+  // Topspin shots launch flatter, backspin shots float higher.
+  state.ball.vy = SHOT_LIFT - spinTop * SPIN_LIFT_TILT;
   state.ball.vx =
     clamp(contactOffsetX * AIM_FACTOR, -MAX_SIDE_SPEED, MAX_SIDE_SPEED) +
     (rand() * 2 - 1) * 30;
-  // A moving racket brushes spin onto the ball: lateral movement gives side
-  // spin, upward movement gives topspin (downward chop gives backspin).
   state.ball.spinSide = clamp(seat.vel.x * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
-  state.ball.spinTop = clamp(seat.vel.y * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
+  state.ball.spinTop = spinTop;
 }
 
 /**
