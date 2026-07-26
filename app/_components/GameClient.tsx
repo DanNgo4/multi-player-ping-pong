@@ -33,7 +33,7 @@ import {
   type ServerMessage,
 } from "@/lib/protocol";
 
-const CANVAS_W = 800;
+const CANVAS_W = 1000;
 const CANVAS_H = 500;
 /** Canvas backing store is rendered at 2x for crispness on hidpi/mobile. */
 const DPR = 2;
@@ -42,7 +42,7 @@ const DPR = 2;
 const FOV = 420;
 const CAM_BACK = 140;
 const CAM_HEIGHT = 190;
-const PIXELS = 2.2;
+const PIXELS = 2.3;
 const CX = CANVAS_W / 2;
 const CY = 96;
 
@@ -251,12 +251,10 @@ export default function GameClient({ room, intent }: Props) {
       const py = ((e.clientY - rect.top) / rect.height) * CANVAS_H;
       racketRef.current = unprojectOwnPlane(px, py, side);
     };
-    const onPointerDown = (e: PointerEvent) => {
-      canvas.setPointerCapture(e.pointerId);
-      track(e);
-    };
-    canvas.addEventListener("pointermove", track);
-    canvas.addEventListener("pointerdown", onPointerDown);
+    // Listen on the window so the racket keeps tracking when the cursor
+    // slips off the canvas while chasing a ball near the table edge.
+    window.addEventListener("pointermove", track);
+    window.addEventListener("pointerdown", track);
 
     let lastSent = "";
     const sender = setInterval(() => {
@@ -269,8 +267,8 @@ export default function GameClient({ room, intent }: Props) {
     }, 33);
 
     return () => {
-      canvas.removeEventListener("pointermove", track);
-      canvas.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", track);
+      window.removeEventListener("pointerdown", track);
       clearInterval(sender);
     };
   }, [role, side, sendMessage]);
@@ -398,6 +396,16 @@ export default function GameClient({ room, intent }: Props) {
                 onClick={() => setViewEnd((v) => (v === 0 ? 1 : 0))}
               >
                 Switch view
+              </button>
+            ) : null}
+            {role === "player" &&
+            (status === "gameover" || status === "waiting" || counts.players > 2) ? (
+              <button
+                className="button secondary"
+                data-testid="spectate"
+                onClick={() => sendMessage({ type: "spectate" })}
+              >
+                Spectate
               </button>
             ) : null}
             {role === "player" && status === "gameover" ? (

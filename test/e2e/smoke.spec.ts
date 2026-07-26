@@ -66,6 +66,15 @@ test("named players, spectator chat, and mid-match side join", async ({ browser 
   });
   await expect(alice.getByTestId("presence")).toContainText("3/4 players");
   await expect(alice.getByTestId("team-0")).toContainText("Carol");
+
+  // With 3 players the extra seat-holder can step back down to watching.
+  await carol.getByTestId("spectate").click();
+  await expect(carol.getByTestId("presence")).toContainText("Spectating", {
+    timeout: 10_000,
+  });
+  await expect(alice.getByTestId("presence")).toContainText("2/4 players");
+  // Back in a mid-game 1v1, the players must not see a spectate button.
+  await expect(alice.getByTestId("spectate")).toHaveCount(0);
 });
 
 test("match is playable on a mobile viewport", async ({ browser }) => {

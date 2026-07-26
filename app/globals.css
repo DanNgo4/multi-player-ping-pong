@@ -198,9 +198,9 @@ main.game {
 
 .game canvas {
   width: 100%;
-  max-width: min(100%, calc((100dvh - 260px) * 1.6));
+  max-width: min(100%, calc((100dvh - 260px) * 2));
   height: auto;
-  aspect-ratio: 8 / 5;
+  aspect-ratio: 2 / 1;
   border: 1px solid #1c2a49;
   border-radius: 10px;
   background: #0b1220;

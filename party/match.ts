@@ -90,6 +90,10 @@ export class MatchServer extends Server<Env> {
       this.handleJoin(conn, msg.side);
       return;
     }
+    if (msg.type === "spectate") {
+      this.handleSpectate(conn);
+      return;
+    }
     const seat = this.state.seats.find((s) => s.id === conn.id);
     // Game input is enforced by server-side role: spectators hold no seat.
     if (!seat) return;
@@ -126,6 +130,25 @@ export class MatchServer extends Server<Env> {
     if (!seat) return;
     this.watcherNames.delete(conn.id);
     this.sendWelcome(conn, seat);
+    this.broadcastState();
+    void this.updateLobby();
+  }
+
+  /** A player steps down to watch. Refused mid-game in a 1v1 — it would kill the match. */
+  private handleSpectate(conn: Connection): void {
+    const seat = this.state.seats.find((s) => s.id === conn.id);
+    if (!seat) return;
+    const midGame = this.state.status === "playing" || this.state.status === "countdown";
+    if (midGame && this.state.seats.length <= 2) return;
+    removeSeat(this.state, conn.id);
+    const name = this.playerNames.get(conn.id) ?? null;
+    this.playerNames.delete(conn.id);
+    this.lastRacketInput.delete(conn.id);
+    this.watcherNames.set(conn.id, name ?? "Guest");
+    if (midGame && sideCount(this.state, seat.side) === 0) {
+      suspendPlay(this.state);
+    }
+    this.sendWelcome(conn, null);
     this.broadcastState();
     void this.updateLobby();
   }

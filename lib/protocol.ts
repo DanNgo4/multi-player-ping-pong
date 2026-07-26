@@ -15,7 +15,9 @@ export type ClientMessage =
   | { type: "restart" }
   | { type: "chat"; text: string }
   /** A spectator asks to grab a free seat on a side; score is kept as-is. */
-  | { type: "join"; side: PlayerIndex };
+  | { type: "join"; side: PlayerIndex }
+  /** A player gives up their seat to watch. Refused mid-game in a 1v1. */
+  | { type: "spectate" };
 
 export type ServerMessage =
   | {
@@ -66,6 +68,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (msg.type === "restart") return msg;
     if (msg.type === "chat" && typeof msg.text === "string") return msg;
     if (msg.type === "join" && (msg.side === 0 || msg.side === 1)) return msg;
+    if (msg.type === "spectate") return msg;
     return null;
   } catch {
     return null;

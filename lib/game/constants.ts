@@ -24,7 +24,7 @@ export const MISS_MARGIN = 60;
 /** Depth window around the racket plane in which a hit can connect. */
 export const HIT_DEPTH = 40;
 /** Racket-to-ball distance (in the racket plane) that still counts as a hit. */
-export const HIT_RADIUS = 48;
+export const HIT_RADIUS = 56;
 /** Height the ball is held at before a serve. */
 export const HIT_HEIGHT = 40;
 
