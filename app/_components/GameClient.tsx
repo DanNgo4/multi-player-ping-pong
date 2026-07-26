@@ -163,6 +163,13 @@ function pingMs(t: number): number {
   return Math.max(0, Math.round(Date.now() - t));
 }
 
+/** Median of recent rtt samples: one queued probe (reconnect blip, throttled
+ * background tab) must not read as multi-second "ping". */
+function medianRtt(samples: readonly number[]): number {
+  const sorted = [...samples].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)] ?? 0;
+}
+
 interface Props {
   room: string;
   intent: "play" | "watch";
@@ -188,6 +195,8 @@ export default function GameClient({ room, intent }: Props) {
   const [counts, setCounts] = useState({ players: 0, spectators: 0 });
   const [rtt, setRtt] = useState<number | null>(null);
   const rttRef = useRef<number | null>(null);
+  const rttSamplesRef = useRef<number[]>([]);
+  const lastPingTRef = useRef<number | null>(null);
   const [seatMeta, setSeatMeta] = useState<SeatInfo[]>([]);
   const [watchers, setWatchers] = useState<string[]>([]);
   const [creator, setCreator] = useState<string | null>(null);
@@ -239,9 +248,16 @@ export default function GameClient({ room, intent }: Props) {
         );
         applyMeta(msg.seats, msg.watchers, msg.creator);
       } else if (msg.type === "pong") {
-        const measured = pingMs(msg.t);
-        rttRef.current = measured;
-        setRtt(measured);
+        // Only the reply to the most recent probe counts; an echo of a probe
+        // that sat in a reconnect buffer would read as seconds of "ping".
+        if (msg.t === lastPingTRef.current) {
+          const samples = rttSamplesRef.current;
+          samples.push(pingMs(msg.t));
+          if (samples.length > 5) samples.shift();
+          const measured = medianRtt(samples);
+          rttRef.current = measured;
+          setRtt(measured);
+        }
       } else if (msg.type === "chat") {
         setChatLog((prev) => [...prev.slice(-(MAX_CHAT_LINES - 1)), msg]);
       }
@@ -274,13 +290,17 @@ export default function GameClient({ room, intent }: Props) {
 
   // Latency probe so "is it me or the server?" is answerable from the HUD.
   // The measured rtt rides along so the server can lag-compensate our hits.
+  // No probes from hidden tabs or closed sockets — those samples only lie.
   useEffect(() => {
     const probe = setInterval(() => {
+      if (document.hidden || socket.readyState !== WebSocket.OPEN) return;
+      const t = Date.now();
+      lastPingTRef.current = t;
       const last = rttRef.current;
-      sendMessage({ type: "ping", t: Date.now(), ...(last !== null ? { rtt: last } : {}) });
+      sendMessage({ type: "ping", t, ...(last !== null ? { rtt: last } : {}) });
     }, 2000);
     return () => clearInterval(probe);
-  }, [sendMessage]);
+  }, [sendMessage, socket]);
 
   // Pointer (mouse or touch) moves the racket; positions stream at ~30 Hz.
   useEffect(() => {
