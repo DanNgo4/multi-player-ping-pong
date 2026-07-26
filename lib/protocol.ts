@@ -17,7 +17,15 @@ export type ClientMessage =
   /** A spectator asks to grab a free seat on a side; score is kept as-is. */
   | { type: "join"; side: PlayerIndex }
   /** A player gives up their seat to watch. Refused mid-game in a 1v1. */
-  | { type: "spectate" };
+  | { type: "spectate" }
+  /** Latency probe; the server echoes t back in a pong. */
+  | { type: "ping"; t: number };
+
+/** Who is at the table, for HUD display; parallel to GameState.seats. */
+export interface SeatInfo {
+  side: PlayerIndex;
+  name: string | null;
+}
 
 export type ServerMessage =
   | {
@@ -33,16 +41,19 @@ export type ServerMessage =
       /** Recent chat lines so a joiner sees the running conversation. */
       chat: ChatEntry[];
     }
+  /** Per-tick snapshot; deliberately slim — presence data travels in "meta". */
+  | { type: "state"; state: GameState }
+  /** Presence and identity; broadcast only when it actually changes. */
   | {
-      type: "state";
-      state: GameState;
+      type: "meta";
       players: number;
       spectators: number;
-      names: SeatNames;
+      seats: SeatInfo[];
       watchers: string[];
       creator: string | null;
     }
-  | { type: "chat"; from: string; text: string };
+  | { type: "chat"; from: string; text: string }
+  | { type: "pong"; t: number };
 
 export interface MatchInfo {
   id: string;
@@ -88,6 +99,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (msg.type === "chat" && typeof msg.text === "string") return msg;
     if (msg.type === "join" && (msg.side === 0 || msg.side === 1)) return msg;
     if (msg.type === "spectate") return msg;
+    if (msg.type === "ping" && Number.isFinite(msg.t)) return msg;
     return null;
   } catch {
     return null;

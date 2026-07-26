@@ -48,6 +48,9 @@ export class MatchServer extends Server<Env> {
   lastChatAt = new Map<string, number>();
   /** Rolling chat log replayed to joiners in their welcome message. */
   chatHistory: ChatEntry[] = [];
+  /** Last broadcast payloads, so identical ticks aren't resent (idle rooms). */
+  lastStateJson = "";
+  lastMetaJson = "";
 
   /**
    * The base class holds env, but its type lives in the `cloudflare:workers`
@@ -85,6 +88,11 @@ export class MatchServer extends Server<Env> {
     if (typeof raw !== "string") return;
     const msg = parseClientMessage(raw);
     if (!msg) return;
+    if (msg.type === "ping") {
+      const pong: ServerMessage = { type: "pong", t: msg.t };
+      conn.send(JSON.stringify(pong));
+      return;
+    }
     if (msg.type === "chat") {
       this.handleChat(conn, msg.text);
       return;
@@ -211,6 +219,8 @@ export class MatchServer extends Server<Env> {
       this.playerNames.clear();
       this.watcherNames.clear();
       this.chatHistory = [];
+      this.lastStateJson = "";
+      this.lastMetaJson = "";
       void this.updateLobby(true);
     } else {
       this.broadcastState();
@@ -278,20 +288,41 @@ export class MatchServer extends Server<Env> {
       chat: this.chatHistory,
     };
     conn.send(JSON.stringify(msg));
+    // A joiner missed all past meta broadcasts, so hand it the current one.
+    conn.send(JSON.stringify(this.metaMsg()));
   }
 
-  private broadcastState(): void {
+  private metaMsg(): ServerMessage {
     const { players, spectators } = this.counts();
-    const msg: ServerMessage = {
-      type: "state",
-      state: this.state,
+    return {
+      type: "meta",
       players,
       spectators,
-      names: this.seatNames(),
+      seats: this.state.seats.map((s) => ({
+        side: s.side,
+        name: this.playerNames.get(s.id) ?? null,
+      })),
       watchers: this.watchers(),
       creator: this.creator,
     };
-    this.broadcast(JSON.stringify(msg));
+  }
+
+  /**
+   * Presence (meta) goes out only when it changes; snapshots go out only when
+   * the simulation actually moved. Idle rooms send nothing at all.
+   */
+  private broadcastState(): void {
+    const meta = JSON.stringify(this.metaMsg());
+    if (meta !== this.lastMetaJson) {
+      this.lastMetaJson = meta;
+      this.broadcast(meta);
+    }
+    const stateMsg: ServerMessage = { type: "state", state: this.state };
+    const state = JSON.stringify(stateMsg);
+    if (state !== this.lastStateJson) {
+      this.lastStateJson = state;
+      this.broadcast(state);
+    }
   }
 
   private async updateLobby(gone = false): Promise<void> {

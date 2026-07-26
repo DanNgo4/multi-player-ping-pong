@@ -30,6 +30,7 @@ import {
   matchTitle,
   type ClientMessage,
   type Role,
+  type SeatInfo,
   type SeatNames,
   type ServerMessage,
 } from "@/lib/protocol";
@@ -135,9 +136,9 @@ interface ChatLine {
   text: string;
 }
 
-interface SeatMeta {
-  side: PlayerIndex;
-  name: string | null;
+/** Round-trip time for a latency probe; module-level to stay out of render scope. */
+function pingMs(t: number): number {
+  return Math.max(0, Math.round(Date.now() - t));
 }
 
 interface Props {
@@ -163,7 +164,8 @@ export default function GameClient({ room, intent }: Props) {
   const [status, setStatus] = useState<MatchStatus>("waiting");
   const [winner, setWinner] = useState<PlayerIndex | null>(null);
   const [counts, setCounts] = useState({ players: 0, spectators: 0 });
-  const [seatMeta, setSeatMeta] = useState<SeatMeta[]>([]);
+  const [rtt, setRtt] = useState<number | null>(null);
+  const [seatMeta, setSeatMeta] = useState<SeatInfo[]>([]);
   const [watchers, setWatchers] = useState<string[]>([]);
   const [creator, setCreator] = useState<string | null>(null);
   const [viewEnd, setViewEnd] = useState<PlayerIndex>(0);
@@ -190,11 +192,14 @@ export default function GameClient({ room, intent }: Props) {
         curSnapRef.current = stamp(msg.state);
         namesRef.current = msg.names;
         setChatLog(msg.chat);
-        applyMeta(msg.state, msg.names, msg.watchers, msg.creator);
+        applyMeta(
+          msg.state.seats.map((s, i) => ({ side: s.side, name: msg.names[i] ?? null })),
+          msg.watchers,
+          msg.creator,
+        );
       } else if (msg.type === "state") {
         prevSnapRef.current = curSnapRef.current;
         curSnapRef.current = stamp(msg.state);
-        namesRef.current = msg.names;
         setStatus(msg.state.status);
         setWinner(msg.state.winner);
         setScores((prev) =>
@@ -202,12 +207,16 @@ export default function GameClient({ room, intent }: Props) {
             ? prev
             : [msg.state.scores[0], msg.state.scores[1]],
         );
+      } else if (msg.type === "meta") {
+        namesRef.current = msg.seats.map((s) => s.name);
         setCounts((prev) =>
           prev.players === msg.players && prev.spectators === msg.spectators
             ? prev
             : { players: msg.players, spectators: msg.spectators },
         );
-        applyMeta(msg.state, msg.names, msg.watchers, msg.creator);
+        applyMeta(msg.seats, msg.watchers, msg.creator);
+      } else if (msg.type === "pong") {
+        setRtt(pingMs(msg.t));
       } else if (msg.type === "chat") {
         setChatLog((prev) => [...prev.slice(-(MAX_CHAT_LINES - 1)), msg]);
       }
@@ -215,17 +224,15 @@ export default function GameClient({ room, intent }: Props) {
   });
 
   const applyMeta = (
-    state: GameState,
-    names: SeatNames,
+    seats: SeatInfo[],
     nextWatchers: string[],
     nextCreator: string | null,
   ) => {
-    const meta = state.seats.map((s, i) => ({ side: s.side, name: names[i] ?? null }));
     setSeatMeta((prev) =>
-      prev.length === meta.length &&
-      prev.every((m, i) => m.side === meta[i]?.side && m.name === meta[i]?.name)
+      prev.length === seats.length &&
+      prev.every((m, i) => m.side === seats[i]?.side && m.name === seats[i]?.name)
         ? prev
-        : meta,
+        : seats,
     );
     setWatchers((prev) =>
       prev.length === nextWatchers.length && prev.every((w, i) => w === nextWatchers[i])
@@ -239,6 +246,12 @@ export default function GameClient({ room, intent }: Props) {
     (msg: ClientMessage) => socket.send(JSON.stringify(msg)),
     [socket],
   );
+
+  // Latency probe so "is it me or the server?" is answerable from the HUD.
+  useEffect(() => {
+    const probe = setInterval(() => sendMessage({ type: "ping", t: Date.now() }), 2000);
+    return () => clearInterval(probe);
+  }, [sendMessage]);
 
   // Pointer (mouse or touch) moves the racket; positions stream at ~30 Hz.
   useEffect(() => {
@@ -367,6 +380,7 @@ export default function GameClient({ room, intent }: Props) {
             : role === "player" && side !== null
               ? ` · You are on Team ${side + 1}`
               : ""}
+          {rtt !== null ? ` · ${rtt} ms ping` : ""}
         </span>
         {watchers.length > 0 ? (
           <span className="watchers" data-testid="watchers">
