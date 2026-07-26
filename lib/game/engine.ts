@@ -1,16 +1,23 @@
 import {
-  BALL_MAX_SPEED,
+  AIM_FACTOR,
   BALL_RADIUS,
-  BALL_SPEED,
-  BALL_SPEED_INCREMENT,
   COUNTDOWN_SECONDS,
-  COURT_HEIGHT,
-  COURT_WIDTH,
-  MAX_BOUNCE_ANGLE,
-  PADDLE_HEIGHT,
-  PADDLE_MARGIN,
-  PADDLE_SPEED,
-  PADDLE_WIDTH,
+  FLOOR_Y,
+  GRAVITY,
+  HIT_DEPTH,
+  HIT_HEIGHT,
+  HIT_RADIUS,
+  MAX_SIDE_SPEED,
+  MISS_MARGIN,
+  NET_HEIGHT,
+  NET_Z,
+  PLAYER_Z,
+  SERVE_DELAY,
+  SHOT_LIFT,
+  SHOT_SPEED_Z,
+  TABLE_LENGTH,
+  TABLE_RESTITUTION,
+  TABLE_WIDTH,
   WIN_SCORE,
 } from "./constants";
 import type { GameState, PlayerIndex } from "./types";
@@ -18,16 +25,8 @@ import type { GameState, PlayerIndex } from "./types";
 /** Injectable randomness source so the engine stays deterministic under test. */
 export type Rand = () => number;
 
-const halfAngle = MAX_BOUNCE_ANGLE / 2;
-
-/** Places the ball at centre court moving toward the given player. */
-export function serve(state: GameState, toward: PlayerIndex, rand: Rand = () => 0.5): void {
-  const angle = (rand() * 2 - 1) * halfAngle;
-  const dir = toward === 0 ? -1 : 1;
-  state.ball.x = COURT_WIDTH / 2;
-  state.ball.y = COURT_HEIGHT / 2;
-  state.ball.vx = Math.cos(angle) * BALL_SPEED * dir;
-  state.ball.vy = Math.sin(angle) * BALL_SPEED;
+export function opponent(i: PlayerIndex): PlayerIndex {
+  return i === 0 ? 1 : 0;
 }
 
 export function beginCountdown(state: GameState): void {
@@ -37,111 +36,144 @@ export function beginCountdown(state: GameState): void {
 
 /** Advances the match by dt seconds. Mutates and returns the same state object. */
 export function step(state: GameState, dt: number, rand: Rand = () => 0.5): GameState {
-  movePaddles(state, dt);
-
   if (state.status === "countdown") {
     state.countdown -= dt;
     if (state.countdown <= 0) {
       state.countdown = 0;
       state.status = "playing";
-      if (state.ball.vx === 0 && state.ball.vy === 0) {
-        serve(state, rand() < 0.5 ? 0 : 1, rand);
-      }
+      prepareServe(state);
     }
     return state;
   }
 
   if (state.status !== "playing") return state;
 
+  if (!state.live) {
+    holdBall(state);
+    state.serveTimer -= dt;
+    if (state.serveTimer <= 0) launchServe(state, rand);
+    return state;
+  }
+
   const ball = state.ball;
+  const prevY = ball.y;
+  const prevZ = ball.z;
+
+  ball.vy -= GRAVITY * dt;
   ball.x += ball.vx * dt;
   ball.y += ball.vy * dt;
+  ball.z += ball.vz * dt;
 
-  if (ball.y - BALL_RADIUS < 0) {
+  // Net: interpolate height at the moment the ball crosses the net plane.
+  if ((prevZ - NET_Z) * (ball.z - NET_Z) < 0) {
+    const t = (NET_Z - prevZ) / (ball.z - prevZ);
+    const heightAtNet = prevY + (ball.y - prevY) * t;
+    if (heightAtNet <= NET_HEIGHT) {
+      resolveDead(state);
+      return state;
+    }
+  }
+
+  // Table bounce.
+  const overTable =
+    ball.z >= 0 && ball.z <= TABLE_LENGTH && Math.abs(ball.x) <= TABLE_WIDTH / 2;
+  if (ball.vy < 0 && ball.y <= BALL_RADIUS && overTable) {
     ball.y = BALL_RADIUS;
-    ball.vy = Math.abs(ball.vy);
-  } else if (ball.y + BALL_RADIUS > COURT_HEIGHT) {
-    ball.y = COURT_HEIGHT - BALL_RADIUS;
-    ball.vy = -Math.abs(ball.vy);
+    ball.vy = -ball.vy * TABLE_RESTITUTION;
+    if (state.lastHitter !== null) {
+      const side: PlayerIndex = ball.z < NET_Z ? 0 : 1;
+      if (side !== state.lastHitter) state.bouncedSinceHit = true;
+    }
   }
 
-  const leftFace = PADDLE_MARGIN + PADDLE_WIDTH;
-  const rightFace = COURT_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH;
+  // Racket hits.
+  for (const i of [0, 1] as const) {
+    const plane = PLAYER_Z[i];
+    const toward = i === 0 ? ball.vz < 0 : ball.vz > 0;
+    if (!toward || Math.abs(ball.z - plane) > HIT_DEPTH) continue;
+    const racket = state.rackets[i];
+    const dx = ball.x - racket.x;
+    const dy = ball.y - racket.y;
+    if (dx * dx + dy * dy > HIT_RADIUS * HIT_RADIUS) continue;
+    ball.z = plane + (i === 0 ? 10 : -10);
+    shoot(state, i, dx, rand);
+    state.lastHitter = i;
+    state.bouncedSinceHit = false;
+  }
+
+  // Dead ball: fell below the table, or flew past a racket plane.
   if (
-    ball.vx < 0 &&
-    ball.x - BALL_RADIUS <= leftFace &&
-    ball.x + BALL_RADIUS >= PADDLE_MARGIN &&
-    overlapsPaddle(state, 0)
+    ball.y < FLOOR_Y ||
+    ball.z < PLAYER_Z[0] - MISS_MARGIN ||
+    ball.z > PLAYER_Z[1] + MISS_MARGIN
   ) {
-    bounceOffPaddle(state, 0);
-  } else if (
-    ball.vx > 0 &&
-    ball.x + BALL_RADIUS >= rightFace &&
-    ball.x - BALL_RADIUS <= COURT_WIDTH - PADDLE_MARGIN &&
-    overlapsPaddle(state, 1)
-  ) {
-    bounceOffPaddle(state, 1);
-  }
-
-  if (ball.x + BALL_RADIUS < 0) {
-    score(state, 1, rand);
-  } else if (ball.x - BALL_RADIUS > COURT_WIDTH) {
-    score(state, 0, rand);
+    resolveDead(state);
   }
 
   return state;
 }
 
-function movePaddles(state: GameState, dt: number): void {
-  for (const paddle of state.paddles) {
-    paddle.y += paddle.dir * PADDLE_SPEED * dt;
-    paddle.y = clamp(paddle.y, 0, COURT_HEIGHT - PADDLE_HEIGHT);
-  }
+function shoot(state: GameState, hitter: PlayerIndex, contactOffsetX: number, rand: Rand): void {
+  const dir = hitter === 0 ? 1 : -1;
+  state.ball.vz = SHOT_SPEED_Z * dir;
+  state.ball.vy = SHOT_LIFT;
+  state.ball.vx =
+    clamp(contactOffsetX * AIM_FACTOR, -MAX_SIDE_SPEED, MAX_SIDE_SPEED) +
+    (rand() * 2 - 1) * 30;
 }
 
-function overlapsPaddle(state: GameState, i: PlayerIndex): boolean {
-  const paddle = state.paddles[i];
-  return (
-    state.ball.y + BALL_RADIUS >= paddle.y &&
-    state.ball.y - BALL_RADIUS <= paddle.y + PADDLE_HEIGHT
-  );
+/**
+ * If the last shot bounced on the receiver's side, the receiver failed to
+ * return it and the hitter scores; otherwise the shot itself was a fault
+ * (net, long, or wide) and the receiver scores.
+ */
+function resolveDead(state: GameState): void {
+  const faultBy = state.lastHitter ?? state.server;
+  const to = state.bouncedSinceHit ? faultBy : opponent(faultBy);
+  awardPoint(state, to);
 }
 
-function bounceOffPaddle(state: GameState, i: PlayerIndex): void {
-  const paddle = state.paddles[i];
-  const offset = clamp(
-    (state.ball.y - (paddle.y + PADDLE_HEIGHT / 2)) / (PADDLE_HEIGHT / 2),
-    -1,
-    1,
-  );
-  const angle = offset * MAX_BOUNCE_ANGLE;
-  const speed = Math.min(
-    Math.hypot(state.ball.vx, state.ball.vy) + BALL_SPEED_INCREMENT,
-    BALL_MAX_SPEED,
-  );
-  const dir = i === 0 ? 1 : -1;
-  state.ball.vx = Math.cos(angle) * speed * dir;
-  state.ball.vy = Math.sin(angle) * speed;
-  state.ball.x =
-    i === 0
-      ? PADDLE_MARGIN + PADDLE_WIDTH + BALL_RADIUS
-      : COURT_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH - BALL_RADIUS;
-}
-
-function score(state: GameState, winner: PlayerIndex, rand: Rand): void {
-  state.scores[winner] += 1;
-  if (state.scores[winner] >= WIN_SCORE) {
+function awardPoint(state: GameState, to: PlayerIndex): void {
+  state.scores[to] += 1;
+  if (state.scores[to] >= WIN_SCORE) {
     state.status = "gameover";
-    state.winner = winner;
-    state.ball.x = COURT_WIDTH / 2;
-    state.ball.y = COURT_HEIGHT / 2;
+    state.winner = to;
+    state.live = false;
     state.ball.vx = 0;
     state.ball.vy = 0;
-  } else {
-    serve(state, winner === 0 ? 1 : 0, rand);
+    state.ball.vz = 0;
+    return;
   }
+  state.server = opponent(to);
+  prepareServe(state);
 }
 
-function clamp(value: number, min: number, max: number): number {
+function prepareServe(state: GameState): void {
+  state.live = false;
+  state.serveTimer = SERVE_DELAY;
+  state.lastHitter = null;
+  state.bouncedSinceHit = false;
+  holdBall(state);
+}
+
+/** While waiting to serve, the ball tracks the server's racket. */
+function holdBall(state: GameState): void {
+  const racket = state.rackets[state.server];
+  state.ball.x = racket.x;
+  state.ball.y = HIT_HEIGHT;
+  state.ball.z = state.server === 0 ? 0 : TABLE_LENGTH;
+  state.ball.vx = 0;
+  state.ball.vy = 0;
+  state.ball.vz = 0;
+}
+
+function launchServe(state: GameState, rand: Rand): void {
+  state.live = true;
+  state.lastHitter = state.server;
+  state.bouncedSinceHit = false;
+  shoot(state, state.server, 0, rand);
+}
+
+export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }

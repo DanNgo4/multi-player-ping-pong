@@ -1,6 +1,6 @@
 import type * as Party from "partykit/server";
-import { TICK_HZ } from "../lib/game/constants";
-import { beginCountdown, step } from "../lib/game/engine";
+import { RACKET_MAX_X, RACKET_MAX_Y, TICK_HZ } from "../lib/game/constants";
+import { beginCountdown, clamp, step } from "../lib/game/engine";
 import { createInitialState, type GameState, type PlayerIndex } from "../lib/game/types";
 import {
   parseClientMessage,
@@ -45,8 +45,11 @@ export default class MatchServer implements Party.Server {
     const playerIndex = this.players.get(conn.id);
     // Input is enforced by server-side role: spectators are simply not in the map.
     if (!msg || playerIndex === undefined) return;
-    if (msg.type === "input") {
-      this.state.paddles[playerIndex].dir = msg.dir;
+    if (msg.type === "racket") {
+      this.state.rackets[playerIndex] = {
+        x: clamp(msg.x, -RACKET_MAX_X, RACKET_MAX_X),
+        y: clamp(msg.y, 0, RACKET_MAX_Y),
+      };
     } else if (msg.type === "restart" && this.state.status === "gameover") {
       this.state = createInitialState();
       if (this.players.size === 2) beginCountdown(this.state);

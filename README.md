@@ -12,7 +12,7 @@ npm install
 npm run dev     # Next.js on :3000 + PartyKit on :1999
 ```
 
-Open http://localhost:3000, create a match, then join the same room from a second tab. Watch it live from `/watch/<room>`.
+Open http://localhost:3000, create a match, then join the same room from a second tab. Move your racket with the mouse to return the ball. Watch a match live from `/watch/<room>`.
 
 ## Test
 

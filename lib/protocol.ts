@@ -1,9 +1,9 @@
-import type { GameState, MatchStatus, PaddleDir, PlayerIndex } from "./game/types";
+import type { GameState, MatchStatus, PlayerIndex } from "./game/types";
 
 export type Role = "player" | "spectator";
 
 export type ClientMessage =
-  | { type: "input"; dir: PaddleDir }
+  | { type: "racket"; x: number; y: number }
   | { type: "restart" };
 
 export type ServerMessage =
@@ -26,7 +26,7 @@ export type LobbyServerMessage = { type: "matches"; matches: MatchInfo[] };
 export function parseClientMessage(raw: string): ClientMessage | null {
   try {
     const msg = JSON.parse(raw) as ClientMessage;
-    if (msg.type === "input" && (msg.dir === -1 || msg.dir === 0 || msg.dir === 1)) return msg;
+    if (msg.type === "racket" && Number.isFinite(msg.x) && Number.isFinite(msg.y)) return msg;
     if (msg.type === "restart") return msg;
     return null;
   } catch {
