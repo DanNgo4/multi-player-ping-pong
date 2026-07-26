@@ -141,7 +141,8 @@ export function step(state: GameState, dt: number, rand: Rand = () => 0.5): Game
   // topspin adds dip beyond gravity; backspin (negative) floats the ball.
   const travel = Math.sign(ball.vz) || 1;
   ball.vx += ball.spinSide * MAGNUS_SIDE * travel * dt;
-  ball.vy -= ball.spinTop * MAGNUS_TOP * dt;
+  // Backspin float is halved so a chopped ball hangs but never soars upward.
+  ball.vy -= ball.spinTop * MAGNUS_TOP * (ball.spinTop > 0 ? 1 : 0.5) * dt;
   ball.x += ball.vx * dt;
   ball.y += ball.vy * dt;
   ball.z += ball.vz * dt;
@@ -293,7 +294,12 @@ function launchServe(state: GameState, rand: Rand): void {
   state.live = true;
   state.lastHitter = state.server;
   state.bouncedSinceHit = false;
+  // Serves are controlled: waving the racket during the serve delay must not
+  // add swipe power or spin, or the serve flies long or floats sky-high.
+  const waved = seat.vel;
+  seat.vel = { x: 0, y: 0 };
   shoot(state, seat, 0, rand);
+  seat.vel = waved;
 }
 
 export function clamp(value: number, min: number, max: number): number {

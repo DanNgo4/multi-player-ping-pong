@@ -92,6 +92,19 @@ describe("countdown and serve", () => {
     expect(state.lastHitter).toBe(0);
   });
 
+  it("serves with a fixed profile even when the racket is waving", () => {
+    const state = seatedState();
+    state.status = "playing";
+    state.live = false;
+    state.serveTimer = 0.01;
+    state.seats[0]!.vel = { x: 900, y: 900 };
+    step(state, TICK);
+    expect(state.live).toBe(true);
+    expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+    expect(state.ball.spinTop).toBe(0);
+    expect(state.ball.spinSide).toBe(0);
+  });
+
   it("holds the ball on the serving player's racket before the serve", () => {
     const state = seatedState();
     state.status = "playing";
