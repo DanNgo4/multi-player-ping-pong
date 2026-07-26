@@ -7,11 +7,13 @@ import {
   HIT_DEPTH,
   HIT_HEIGHT,
   HIT_RADIUS,
+  HIT_RADIUS_BELOW,
   MAGNUS_SIDE,
   MAGNUS_TOP,
   MAX_RACKET_SPEED,
   MAX_SIDE_SPEED,
   MAX_SPIN,
+  MIN_BOUNCE_VY,
   MISS_MARGIN,
   NET_CORD_DAMP,
   NET_HEIGHT,
@@ -30,6 +32,7 @@ import {
   TABLE_LENGTH,
   TABLE_RESTITUTION,
   TABLE_WIDTH,
+  TICK_HZ,
   WIN_SCORE,
 } from "./constants";
 import {
@@ -190,6 +193,12 @@ export function step(state: GameState, dt: number, rand: Rand = () => 0.5): Game
       const side: PlayerIndex = ball.z < NET_Z ? 0 : 1;
       if (side !== state.lastHitter) state.bouncedSinceHit = true;
     }
+    // Too weak to bounce again: the ball is rolling on the table ("deflated"),
+    // so the point resolves instead of the rally hanging forever.
+    if (ball.vy < MIN_BOUNCE_VY) {
+      resolveDead(state);
+      return state;
+    }
   }
 
   // Racket hits: any seat on the side the ball is heading toward may return it.
@@ -199,7 +208,15 @@ export function step(state: GameState, dt: number, rand: Rand = () => 0.5): Game
     if (!toward || Math.abs(ball.z - plane) > HIT_DEPTH) continue;
     const dx = ball.x - seat.racket.x;
     const dy = ball.y - seat.racket.y;
-    if (dx * dx + dy * dy > HIT_RADIUS * HIT_RADIUS) continue;
+    // Elliptical hit region: full reach sideways and above the blade centre,
+    // short reach below it — the handle doesn't return balls.
+    const vertReach = dy < 0 ? HIT_RADIUS_BELOW : HIT_RADIUS;
+    if (
+      (dx * dx) / (HIT_RADIUS * HIT_RADIUS) + (dy * dy) / (vertReach * vertReach) >
+      1
+    ) {
+      continue;
+    }
     ball.z = plane + (seat.side === 0 ? 10 : -10);
     shoot(state, seat, dx, rand);
     state.lastHitter = seat.side;
@@ -288,18 +305,91 @@ function holdBall(state: GameState): void {
   state.ball.spinTop = 0;
 }
 
+/** Spin scales tried for a serve, in order, until the flight lands legally. */
+const SERVE_SPIN_SCALES = [1, 0.7, 0.4, 0];
+
+/**
+ * Simulates a serve's flight (same integration as `step`, at the server tick
+ * rate) and reports whether it clears the net cleanly and first lands on the
+ * receiving side of the table.
+ */
+function serveIsLegal(
+  side: PlayerIndex,
+  x0: number,
+  vx0: number,
+  vy0: number,
+  vz0: number,
+  spinSide: number,
+  spinTop: number,
+): boolean {
+  const dt = 1 / TICK_HZ;
+  let x = x0;
+  let y = HIT_HEIGHT;
+  let z = side === 0 ? 0 : TABLE_LENGTH;
+  let vx = vx0;
+  let vy = vy0;
+  const vz = vz0;
+  const floatFactor = spinTop > 0 ? 1 : 0.5;
+  const travel = Math.sign(vz) || 1;
+  for (let i = 0; i < TICK_HZ * 3; i++) {
+    const prevY = y;
+    const prevZ = z;
+    vy -= GRAVITY * dt;
+    vx += spinSide * MAGNUS_SIDE * travel * dt;
+    vy -= spinTop * MAGNUS_TOP * floatFactor * dt;
+    x += vx * dt;
+    y += vy * dt;
+    z += vz * dt;
+    if ((prevZ - NET_Z) * (z - NET_Z) < 0) {
+      const t = (NET_Z - prevZ) / (z - prevZ);
+      const heightAtNet = prevY + (y - prevY) * t;
+      // Must clear the tape cleanly — a cord clip or block is not a serve.
+      if (heightAtNet <= NET_HEIGHT + BALL_RADIUS) return false;
+    }
+    if (vy < 0 && y <= BALL_RADIUS) {
+      const onReceivingSide = side === 0 ? z > NET_Z : z < NET_Z;
+      return (
+        onReceivingSide &&
+        z >= 0 &&
+        z <= TABLE_LENGTH &&
+        Math.abs(x) <= TABLE_WIDTH / 2
+      );
+    }
+    if (y < FLOOR_Y || z < PLAYER_Z[0] || z > PLAYER_Z[1]) return false;
+  }
+  return false;
+}
+
 function launchServe(state: GameState, rand: Rand): void {
   const seat = servingSeat(state);
   if (!seat) return;
   state.live = true;
   state.lastHitter = state.server;
   state.bouncedSinceHit = false;
-  // Serves are controlled: waving the racket during the serve delay must not
-  // add swipe power or spin, or the serve flies long or floats sky-high.
-  const waved = seat.vel;
-  seat.vel = { x: 0, y: 0 };
-  shoot(state, seat, 0, rand);
-  seat.vel = waved;
+  const ball = state.ball;
+  const dir = seat.side === 0 ? 1 : -1;
+  const vx = (rand() * 2 - 1) * 30;
+  const vz = SHOT_SPEED_Z * dir;
+  // Racket motion at launch styles the serve — topspin, backspin, or side
+  // curve — but never adds raw power. The flight is pre-simulated and the
+  // spin scaled down until the serve is guaranteed to land on the receiving
+  // side, so no serve style can fly long or sky-high.
+  const rawSide = clamp(seat.vel.x * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
+  const rawTop = clamp(seat.vel.y * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
+  for (const scale of SERVE_SPIN_SCALES) {
+    const spinSide = rawSide * scale;
+    const spinTop = rawTop * scale;
+    const vy = SHOT_LIFT - spinTop * SPIN_LIFT_TILT;
+    if (scale !== 0 && !serveIsLegal(seat.side, ball.x, vx, vy, vz, spinSide, spinTop)) {
+      continue;
+    }
+    ball.vx = vx;
+    ball.vy = vy;
+    ball.vz = vz;
+    ball.spinSide = spinSide;
+    ball.spinTop = spinTop;
+    return;
+  }
 }
 
 export function clamp(value: number, min: number, max: number): number {

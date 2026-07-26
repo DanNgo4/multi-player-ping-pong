@@ -18,11 +18,14 @@ import {
 } from "../lib/game/engine";
 import { createInitialState, type GameState, type PlayerIndex, type Seat } from "../lib/game/types";
 import {
+  matchTitle,
   parseClientMessage,
   sanitizeChat,
   sanitizeName,
   type ChatEntry,
+  type LobbyPost,
   type LobbyUpdate,
+  type MatchResult,
   type SeatNames,
   type ServerMessage,
 } from "../lib/protocol";
@@ -222,10 +225,30 @@ export class MatchServer extends Server<Env> {
 
   private tick(): void {
     const before = `${this.state.scores[0]}:${this.state.scores[1]}:${this.state.status}`;
+    const wasOver = this.state.status === "gameover";
     step(this.state, 1 / TICK_HZ, Math.random);
     this.broadcastState();
     const after = `${this.state.scores[0]}:${this.state.scores[1]}:${this.state.status}`;
     if (before !== after) void this.updateLobby();
+    if (!wasOver && this.state.status === "gameover") void this.reportResult();
+  }
+
+  /** Records a finished game with the lobby for the history list/leaderboard. */
+  private async reportResult(): Promise<void> {
+    if (this.state.winner === null) return;
+    const names: [string[], string[]] = [[], []];
+    for (const s of this.state.seats) {
+      names[s.side].push(this.playerNames.get(s.id) ?? "Guest");
+    }
+    const result: MatchResult = {
+      id: this.name,
+      title: matchTitle(this.creator, this.name),
+      names,
+      scores: [...this.state.scores],
+      winner: this.state.winner,
+      endedAt: Date.now(),
+    };
+    await this.postLobby({ result });
   }
 
   private counts(): { players: number; spectators: number } {
@@ -284,6 +307,10 @@ export class MatchServer extends Server<Env> {
       creator: this.creator,
       ...(gone ? { gone: true } : {}),
     };
+    await this.postLobby(update);
+  }
+
+  private async postLobby(post: LobbyPost): Promise<void> {
     try {
       const lobby = await getServerByName(
         this.bindings.lobby as Parameters<typeof getServerByName>[0],
@@ -291,7 +318,7 @@ export class MatchServer extends Server<Env> {
       );
       await lobby.fetch("https://lobby.internal/", {
         method: "POST",
-        body: JSON.stringify(update),
+        body: JSON.stringify(post),
       });
     } catch {
       // The lobby listing is best-effort; never let it break a live match.

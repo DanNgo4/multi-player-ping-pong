@@ -59,7 +59,26 @@ export interface MatchInfo {
 /** POSTed from a match room to the lobby room whenever match state changes. */
 export type LobbyUpdate = MatchInfo & { gone?: boolean };
 
-export type LobbyServerMessage = { type: "matches"; matches: MatchInfo[] };
+/** A finished game, kept by the lobby for the history list and leaderboard. */
+export interface MatchResult {
+  id: string;
+  title: string;
+  /** Display names per side at the moment the game ended. */
+  names: [string[], string[]];
+  scores: [number, number];
+  winner: PlayerIndex;
+  /** Epoch milliseconds. */
+  endedAt: number;
+}
+
+/** Match rooms POST either a live-state update or a finished-game result. */
+export type LobbyPost = LobbyUpdate | { result: MatchResult };
+
+export type LobbyServerMessage = {
+  type: "matches";
+  matches: MatchInfo[];
+  results: MatchResult[];
+};
 
 export function parseClientMessage(raw: string): ClientMessage | null {
   try {

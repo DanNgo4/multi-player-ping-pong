@@ -13,6 +13,8 @@ export const NET_RESTITUTION = 0.18;
 export const NET_CORD_DAMP = 0.45;
 export const GRAVITY = 900;
 export const TABLE_RESTITUTION = 0.75;
+/** A bounce weaker than this means the ball is rolling — the point resolves. */
+export const MIN_BOUNCE_VY = 80;
 /** Below this height the ball is dead (fell off the table). */
 export const FLOOR_Y = -80;
 
@@ -25,6 +27,8 @@ export const MISS_MARGIN = 60;
 export const HIT_DEPTH = 40;
 /** Racket-to-ball distance (in the racket plane) that still counts as a hit. */
 export const HIT_RADIUS = 56;
+/** Reach below the blade centre is short — the handle is not part of the bat. */
+export const HIT_RADIUS_BELOW = 34;
 /** Height the ball is held at before a serve. */
 export const HIT_HEIGHT = 40;
 
@@ -57,8 +61,9 @@ export const RACKET_VEL_DECAY = 5;
 export const MAX_RACKET_SPEED = 900;
 
 export const RACKET_RADIUS = 26;
-export const RACKET_MAX_X = 210;
-export const RACKET_MAX_Y = 220;
+// The racket can chase balls curving well outside the table rectangle.
+export const RACKET_MAX_X = 280;
+export const RACKET_MAX_Y = 260;
 
 export const WIN_SCORE = 11;
 export const TICK_HZ = 30;

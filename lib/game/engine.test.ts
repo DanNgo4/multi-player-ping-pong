@@ -92,17 +92,53 @@ describe("countdown and serve", () => {
     expect(state.lastHitter).toBe(0);
   });
 
-  it("serves with a fixed profile even when the racket is waving", () => {
+  it("serves flat and spinless when the racket is still", () => {
     const state = seatedState();
     state.status = "playing";
     state.live = false;
     state.serveTimer = 0.01;
-    state.seats[0]!.vel = { x: 900, y: 900 };
     step(state, TICK);
     expect(state.live).toBe(true);
     expect(state.ball.vz).toBe(SHOT_SPEED_Z);
     expect(state.ball.spinTop).toBe(0);
     expect(state.ball.spinSide).toBe(0);
+  });
+
+  // Steps the match forward after a serve and reports whether the serve
+  // bounced on the receiving side before any point was scored.
+  const serveLandsIn = (state: GameState): boolean => {
+    for (let t = 0; t < 3; t += TICK) {
+      step(state, TICK);
+      if (state.bouncedSinceHit) return true;
+      if (state.scores[0] !== 0 || state.scores[1] !== 0) return false;
+    }
+    return false;
+  };
+
+  it("styles the serve with spin from a moving racket, still landing in", () => {
+    const state = seatedState();
+    state.status = "playing";
+    state.live = false;
+    state.serveTimer = 0.01;
+    state.seats[0]!.vel = { x: 0, y: 600 };
+    step(state, TICK);
+    expect(state.live).toBe(true);
+    expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+    expect(state.ball.spinTop).toBeGreaterThan(0);
+    expect(serveLandsIn(state)).toBe(true);
+  });
+
+  it("keeps an extreme swipe serve legal by scaling the spin down", () => {
+    const state = seatedState();
+    state.status = "playing";
+    state.live = false;
+    state.serveTimer = 0.01;
+    state.seats[0]!.vel = { x: 900, y: -900 };
+    step(state, TICK);
+    expect(state.live).toBe(true);
+    expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+    expect(state.ball.spinTop).toBeLessThan(0);
+    expect(serveLandsIn(state)).toBe(true);
   });
 
   it("holds the ball on the serving player's racket before the serve", () => {
@@ -149,6 +185,19 @@ describe("flight", () => {
     step(state, TICK);
     expect(state.bouncedSinceHit).toBe(true);
   });
+
+  it("resolves the point when the ball is too weak to bounce (rolling)", () => {
+    const state = liveState();
+    state.lastHitter = 0;
+    state.ball.z = NET_Z + 120;
+    state.ball.y = BALL_RADIUS + 1;
+    state.ball.vy = -60;
+    state.ball.vz = 40;
+    step(state, TICK);
+    // Landed on the receiving side, then died rolling: the hitter scores.
+    expect(state.scores).toEqual([1, 0]);
+    expect(state.live).toBe(false);
+  });
 });
 
 describe("racket hits", () => {
@@ -176,6 +225,31 @@ describe("racket hits", () => {
     state.seats[0]!.racket = { x: 150, y: 55 };
     step(state, TICK);
     expect(state.ball.vz).toBe(-SHOT_SPEED_Z);
+  });
+
+  it("does not return balls off the handle below the blade", () => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.ball.x = 0;
+    state.ball.y = 50;
+    state.ball.z = PLAYER_Z[0] + 20;
+    state.ball.vz = -SHOT_SPEED_Z;
+    // Blade centre ~50 above the ball: only the handle overlaps it.
+    state.seats[0]!.racket = { x: 0, y: 100 };
+    step(state, TICK);
+    expect(state.ball.vz).toBe(-SHOT_SPEED_Z);
+  });
+
+  it("keeps full reach above the blade centre", () => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.ball.x = 0;
+    state.ball.y = 90;
+    state.ball.z = PLAYER_Z[0] + 20;
+    state.ball.vz = -SHOT_SPEED_Z;
+    state.seats[0]!.racket = { x: 0, y: 40 };
+    step(state, TICK);
+    expect(state.ball.vz).toBe(SHOT_SPEED_Z);
   });
 
   it("lets a teammate cover the return in a two-seat side", () => {

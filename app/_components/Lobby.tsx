@@ -11,11 +11,13 @@ import {
   matchTitle,
   type LobbyServerMessage,
   type MatchInfo,
+  type MatchResult,
 } from "@/lib/protocol";
 
 export default function Lobby() {
   const router = useRouter();
   const [matches, setMatches] = useState<MatchInfo[]>([]);
+  const [results, setResults] = useState<MatchResult[]>([]);
   const [code, setCode] = useState("");
   const [name, setName] = useState<string>(() => loadName());
 
@@ -25,7 +27,10 @@ export default function Lobby() {
     room: "index",
     onMessage(evt) {
       const msg = JSON.parse(evt.data as string) as LobbyServerMessage;
-      if (msg.type === "matches") setMatches(msg.matches);
+      if (msg.type === "matches") {
+        setMatches(msg.matches);
+        setResults(msg.results ?? []);
+      }
     },
   });
 
@@ -102,6 +107,46 @@ export default function Lobby() {
           </ul>
         )}
       </section>
+      <section>
+        <h2>Leaderboard</h2>
+        {results.length === 0 ? (
+          <p>No finished matches yet.</p>
+        ) : (
+          <ul className="match-list" data-testid="leaderboard">
+            {leaderboard(results).map((row) => (
+              <li key={row.name}>
+                <span className="match-name">{row.name}</span>
+                <span className="match-players">
+                  {row.wins} {row.wins === 1 ? "win" : "wins"} · {row.played} played
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <section>
+        <h2>Recent matches</h2>
+        {results.length === 0 ? (
+          <p data-testid="no-results">Finished games will show up here.</p>
+        ) : (
+          <ul className="match-list" data-testid="result-list">
+            {results.map((r) => (
+              <li key={`${r.id}-${r.endedAt}`}>
+                <span className="match-name">{r.title}</span>
+                <span className="match-players">
+                  {teamLabel(r, 0)} vs {teamLabel(r, 1)}
+                </span>
+                <span>
+                  {r.scores[0]} : {r.scores[1]}
+                </span>
+                <span className="match-players">
+                  {teamLabel(r, r.winner)} won · {timeLabel(r.endedAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </main>
   );
 }
@@ -110,4 +155,38 @@ function playersLabel(m: MatchInfo): string {
   const filled = m.names.filter((n): n is string => n !== null);
   if (filled.length === 0) return "Waiting for players";
   return filled.join(", ");
+}
+
+function teamLabel(r: MatchResult, side: 0 | 1): string {
+  const team = r.names[side];
+  return team.length > 0 ? team.join(" & ") : "Empty side";
+}
+
+function timeLabel(endedAt: number): string {
+  return new Date(endedAt).toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** Wins and games played per display name, most wins first. */
+function leaderboard(
+  results: MatchResult[],
+): { name: string; wins: number; played: number }[] {
+  const rows = new Map<string, { name: string; wins: number; played: number }>();
+  for (const r of results) {
+    ([0, 1] as const).forEach((side) => {
+      for (const name of r.names[side]) {
+        const row = rows.get(name) ?? { name, wins: 0, played: 0 };
+        row.played += 1;
+        if (side === r.winner) row.wins += 1;
+        rows.set(name, row);
+      }
+    });
+  }
+  return [...rows.values()]
+    .sort((a, b) => b.wins - a.wins || a.played - b.played)
+    .slice(0, 10);
 }
