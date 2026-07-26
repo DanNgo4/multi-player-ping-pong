@@ -235,9 +235,9 @@ main.game {
 }
 
 .chat-log {
+  /* Fills the aside, which stretches to the height of the game stage. */
   flex: 1;
   min-height: 8rem;
-  max-height: 24rem;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
