@@ -1,6 +1,7 @@
 node_modules/
 .next/
 .wrangler/
+.partykit/
 .vercel/
 next-env.d.ts
 test-results/
