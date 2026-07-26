@@ -4,7 +4,8 @@
 export const TABLE_WIDTH = 300;
 export const TABLE_LENGTH = 540;
 export const NET_Z = TABLE_LENGTH / 2;
-export const NET_HEIGHT = 40;
+/** Proportional to a real table: 15.25cm net on a 274cm table, at our scale. */
+export const NET_HEIGHT = 30;
 
 export const BALL_RADIUS = 6;
 /** A ball well below the tape rebounds off the net with this restitution... */
