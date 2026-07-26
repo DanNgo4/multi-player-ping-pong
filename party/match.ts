@@ -13,8 +13,8 @@ import {
 } from "../lib/game/constants";
 import {
   addSeat,
+  allReady,
   beginCountdown,
-  bothSidesManned,
   clamp,
   removeSeat,
   resetScores,
@@ -148,9 +148,18 @@ export class MatchServer extends Server<Env> {
       }
       this.lastRacketInput.set(conn.id, { ...next, t: now });
       seat.racket = next;
+    } else if (msg.type === "ready" && this.state.status === "waiting") {
+      seat.ready = !seat.ready;
+      if (allReady(this.state)) beginCountdown(this.state);
+      this.broadcastState();
+      void this.updateLobby();
     } else if (msg.type === "restart" && this.state.status === "gameover") {
-      resetScores(this.state);
-      if (bothSidesManned(this.state)) beginCountdown(this.state);
+      // A rematch starts only once every seated player has pressed it.
+      seat.ready = true;
+      if (allReady(this.state)) {
+        resetScores(this.state);
+        beginCountdown(this.state);
+      }
       this.broadcastState();
       void this.updateLobby();
     }
@@ -191,9 +200,7 @@ export class MatchServer extends Server<Env> {
     const seat = addSeat(this.state, side, id);
     if (!seat) return null;
     this.playerNames.set(id, name);
-    if (this.state.status === "waiting" && bothSidesManned(this.state)) {
-      beginCountdown(this.state);
-    }
+    // No auto-start: play begins when every seated player presses ready.
     return seat;
   }
 

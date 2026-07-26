@@ -59,6 +59,11 @@ export function bothSidesManned(state: GameState): boolean {
   return sideCount(state, 0) > 0 && sideCount(state, 1) > 0;
 }
 
+/** Play may start: both sides manned and every seated player pressed ready. */
+export function allReady(state: GameState): boolean {
+  return bothSidesManned(state) && state.seats.every((s) => s.ready);
+}
+
 /** Adds a seat for a joining player; returns it, or null when the side/match is full. */
 export function addSeat(state: GameState, side: PlayerIndex, id: string): Seat | null {
   if (state.seats.length >= MAX_PLAYERS) return null;
@@ -73,6 +78,7 @@ export function addSeat(state: GameState, side: PlayerIndex, id: string): Seat |
     racket: { x, y: HIT_HEIGHT },
     vel: { x: 0, y: 0 },
     lagTicks: 0,
+    ready: false,
   };
   state.seats.push(seat);
   return seat;
@@ -111,6 +117,7 @@ export function resetScores(state: GameState): void {
   state.winner = null;
   state.server = 0;
   state.serveTurns = [0, 0];
+  for (const seat of state.seats) seat.ready = false;
   suspendPlay(state);
 }
 

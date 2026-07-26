@@ -231,6 +231,8 @@ export default function GameClient({ room, intent }: Props) {
   const [side, setSide] = useState<PlayerIndex | null>(null);
   const [scores, setScores] = useState<[number, number]>([0, 0]);
   const [status, setStatus] = useState<MatchStatus>("waiting");
+  const [myReady, setMyReady] = useState(false);
+  const [readyCount, setReadyCount] = useState(0);
   const [winner, setWinner] = useState<PlayerIndex | null>(null);
   const [counts, setCounts] = useState({ players: 0, spectators: 0 });
   const [rtt, setRtt] = useState<number | null>(null);
@@ -279,6 +281,10 @@ export default function GameClient({ room, intent }: Props) {
             ? prev
             : [msg.state.scores[0], msg.state.scores[1]],
         );
+        setMyReady(
+          msg.state.seats.some((s) => s.id === seatIdRef.current && s.ready),
+        );
+        setReadyCount(msg.state.seats.filter((s) => s.ready).length);
       } else if (msg.type === "meta") {
         namesRef.current = msg.seats.map((s) => s.name);
         setCounts((prev) =>
@@ -498,6 +504,15 @@ export default function GameClient({ room, intent }: Props) {
             data-testid="court"
           />
           <div className="stage-controls">
+            {role === "player" && status === "waiting" ? (
+              <button
+                className="button"
+                data-testid="ready"
+                onClick={() => sendMessage({ type: "ready" })}
+              >
+                {myReady ? "Ready ✓" : "Ready"} ({readyCount}/{counts.players})
+              </button>
+            ) : null}
             {joinableSides.map((s) => (
               <button
                 key={s}
@@ -533,7 +548,7 @@ export default function GameClient({ room, intent }: Props) {
                 data-testid="rematch"
                 onClick={() => sendMessage({ type: "restart" })}
               >
-                Rematch
+                {myReady ? "Rematch ✓" : "Rematch"} ({readyCount}/{counts.players})
               </button>
             ) : null}
           </div>

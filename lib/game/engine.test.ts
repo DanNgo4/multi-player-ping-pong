@@ -13,6 +13,7 @@ import {
 } from "./constants";
 import {
   addSeat,
+  allReady,
   beginCountdown,
   bothSidesManned,
   removeSeat,
@@ -76,6 +77,26 @@ describe("seats", () => {
     removeSeat(state, "b");
     expect(bothSidesManned(state)).toBe(false);
     expect(state.seats).toHaveLength(1);
+  });
+});
+
+describe("ready check", () => {
+  it("is ready only when both sides are manned and all players pressed", () => {
+    const state = seatedState();
+    expect(allReady(state)).toBe(false);
+    state.seats[0]!.ready = true;
+    expect(allReady(state)).toBe(false);
+    state.seats[1]!.ready = true;
+    expect(allReady(state)).toBe(true);
+    removeSeat(state, "b");
+    expect(allReady(state)).toBe(false);
+  });
+
+  it("clears ready flags on a score reset so a rematch needs new consent", () => {
+    const state = seatedState();
+    state.seats.forEach((s) => (s.ready = true));
+    resetScores(state);
+    expect(state.seats.every((s) => !s.ready)).toBe(true);
   });
 });
 

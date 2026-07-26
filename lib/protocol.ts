@@ -18,6 +18,8 @@ export type ClientMessage =
   | { type: "join"; side: PlayerIndex }
   /** A player gives up their seat to watch. Refused mid-game in a 1v1. */
   | { type: "spectate" }
+  /** Toggles the sender's ready flag; play starts when all players are ready. */
+  | { type: "ready" }
   /**
    * Latency probe; the server echoes t back in a pong. `rtt` is the client's
    * last measured round-trip in ms — it feeds lag compensation (server caps
@@ -103,6 +105,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (msg.type === "chat" && typeof msg.text === "string") return msg;
     if (msg.type === "join" && (msg.side === 0 || msg.side === 1)) return msg;
     if (msg.type === "spectate") return msg;
+    if (msg.type === "ready") return msg;
     if (msg.type === "ping" && Number.isFinite(msg.t)) {
       return msg.rtt !== undefined && !Number.isFinite(msg.rtt)
         ? { type: "ping", t: msg.t }

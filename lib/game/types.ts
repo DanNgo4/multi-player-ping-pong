@@ -41,6 +41,8 @@ export interface Seat {
    * measured ping; 0 for low-latency players.
    */
   lagTicks: number;
+  /** Play starts only when every seated player has pressed ready. */
+  ready: boolean;
 }
 
 export interface GameState {

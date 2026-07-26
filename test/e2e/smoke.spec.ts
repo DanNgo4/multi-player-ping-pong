@@ -35,6 +35,12 @@ test("named players, spectator chat, and mid-match side join", async ({ browser 
   await expect(bob.getByTestId("presence")).toContainText("You are on Team 2", {
     timeout: 15_000,
   });
+  // Play starts only when every player presses ready.
+  await expect(alice.getByTestId("status")).toHaveText(/waiting/i);
+  await alice.getByTestId("ready").click();
+  await expect(alice.getByTestId("ready")).toContainText("1/2", { timeout: 10_000 });
+  await expect(alice.getByTestId("status")).toHaveText(/waiting/i);
+  await bob.getByTestId("ready").click();
   await expect(alice.getByTestId("status")).not.toHaveText(/waiting/i, { timeout: 10_000 });
   await expect(alice.getByTestId("presence")).toContainText("2/4 players");
   await expect(alice.getByTestId("team-1")).toContainText("Bob");
