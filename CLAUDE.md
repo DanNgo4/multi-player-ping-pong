@@ -13,7 +13,7 @@ Conventions here are adapted from the Fundwise platform repo (`D:\N\2. Work\2. F
 Single npm package at the repo root (no monorepo).
 
 ```
-npm run dev          # concurrently: next dev (:3000) + partykit dev (:1999)
+npm run dev          # concurrently: next dev (:3000) + wrangler dev (:1999)
 npm run build        # next build
 npm run typecheck    # tsc --noEmit
 npm run lint         # eslint . --max-warnings 0
@@ -25,7 +25,7 @@ Single test file: `npm test -- lib/game/physics.test.ts`
 Single test by name: `npm test -- -t "ball bounces off paddle"`
 One e2e spec: `npx playwright test test/e2e/smoke.spec.ts` (first-time: `npx playwright install chromium`)
 
-Deploy: `vercel` for the Next.js app, `npx partykit deploy` for the room server. The PartyKit host URL is provided to the client via `NEXT_PUBLIC_PARTYKIT_HOST`.
+Deploy: `vercel --prod` for the Next.js app, `npm run deploy:party` (wrangler) for the room server, which runs as Cloudflare Durable Objects at `multi-player-ping-pong.danngo-au.workers.dev`. The room-server host is provided to the client via `NEXT_PUBLIC_PARTYKIT_HOST` (set in Vercel project env). Note: the room server uses `partyserver` (Cloudflare's PartyKit successor), NOT hosted PartyKit — `partykit deploy` is dead, its shared partykit.dev zone hit Cloudflare's custom-domain cap. The client still uses `partysocket`; URL scheme `/parties/:party/:room` is unchanged.
 
 Before every push, run locally: `npm run typecheck && npm run lint && npm test`.
 
