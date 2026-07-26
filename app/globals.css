@@ -45,6 +45,31 @@ h2 {
   background: #4381ff;
 }
 
+.button.secondary {
+  background: #1c2a49;
+}
+
+.button.secondary:hover {
+  background: #263a63;
+}
+
+input {
+  background: #101a30;
+  border: 1px solid #2a3955;
+  border-radius: 8px;
+  color: #e8eefc;
+  padding: 0.6rem 0.8rem;
+  font-size: 1rem;
+}
+
+.name-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: #9db1d9;
+  font-size: 0.9rem;
+}
+
 .lobby .actions {
   display: flex;
   gap: 1rem;
@@ -55,15 +80,6 @@ h2 {
 .lobby form {
   display: flex;
   gap: 0.5rem;
-}
-
-.lobby input {
-  background: #101a30;
-  border: 1px solid #2a3955;
-  border-radius: 8px;
-  color: #e8eefc;
-  padding: 0.6rem 0.8rem;
-  font-size: 1rem;
 }
 
 .lobby section {
@@ -93,16 +109,56 @@ h2 {
   flex-wrap: wrap;
 }
 
+.match-list .match-name {
+  font-weight: 600;
+}
+
+.match-list .match-players {
+  color: #9db1d9;
+  font-size: 0.9rem;
+}
+
 .match-list a {
   color: #6fa1ff;
 }
 
+/* The match page uses the whole viewport. */
+main.game {
+  max-width: none;
+  width: 100%;
+  min-height: 100dvh;
+  padding: 0.75rem 1rem 1rem;
+  gap: 0.75rem;
+}
+
 .game .hud {
   display: flex;
-  gap: 1.5rem;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: center;
+  text-align: center;
+}
+
+.game .match-title {
+  font-size: 1.35rem;
+  color: #ffd166;
+}
+
+.game .scoreline {
+  display: flex;
+  gap: 1rem;
   align-items: baseline;
-  flex-wrap: wrap;
   justify-content: center;
+  flex-wrap: wrap;
+}
+
+.game .player-name {
+  color: #9db1d9;
+  font-size: 1rem;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .game .score {
@@ -116,19 +172,133 @@ h2 {
   min-height: 1.2em;
 }
 
-.game .presence {
+.game .presence,
+.game .watchers {
   color: #9db1d9;
   font-size: 0.9rem;
 }
 
+.game-layout {
+  display: flex;
+  gap: 1rem;
+  width: 100%;
+  flex: 1;
+  justify-content: center;
+  align-items: stretch;
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
 .game canvas {
-  max-width: 100%;
+  width: 100%;
+  max-width: min(100%, calc((100dvh - 260px) * 1.6));
+  height: auto;
+  aspect-ratio: 8 / 5;
   border: 1px solid #1c2a49;
   border-radius: 10px;
   background: #0b1220;
+  /* Touch drag moves the racket instead of scrolling the page. */
+  touch-action: none;
+}
+
+.stage-controls {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: 260px;
+  flex-shrink: 0;
+  background: #0d1526;
+  border: 1px solid #1c2a49;
+  border-radius: 10px;
+  padding: 0.75rem;
+}
+
+.chat-log {
+  flex: 1;
+  min-height: 8rem;
+  max-height: 24rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+}
+
+.chat-log strong {
+  color: #6fa1ff;
+  font-weight: 600;
+}
+
+.chat form {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.chat input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.9rem;
+}
+
+.chat .button {
+  padding: 0.45rem 0.8rem;
+  font-size: 0.9rem;
 }
 
 .hint {
   color: #64769b;
   font-size: 0.9rem;
+}
+
+@media (max-width: 900px) {
+  main.game {
+    padding: 0.5rem 0.5rem 1rem;
+  }
+
+  .game-layout {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .game canvas {
+    max-width: 100%;
+  }
+
+  .chat {
+    width: 100%;
+    max-width: 640px;
+  }
+
+  .chat-log {
+    min-height: 5rem;
+    max-height: 10rem;
+  }
+
+  .game .match-title {
+    font-size: 1.1rem;
+  }
+
+  .game .score {
+    font-size: 1.5rem;
+  }
+
+  .game .player-name {
+    max-width: 9rem;
+    font-size: 0.9rem;
+  }
 }

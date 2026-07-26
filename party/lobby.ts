@@ -19,8 +19,11 @@ export class LobbyServer extends Server<Env> {
           id: update.id,
           players: update.players,
           spectators: update.spectators,
+          sides: update.sides,
           scores: update.scores,
           status: update.status,
+          names: update.names,
+          creator: update.creator,
         });
       }
       this.broadcast(this.snapshot());

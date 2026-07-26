@@ -1,7 +1,12 @@
 import { HIT_HEIGHT } from "./constants";
 
+/** Side of the table: 0 plays from z=0, 1 from z=TABLE_LENGTH. */
 export type PlayerIndex = 0 | 1;
 export type MatchStatus = "waiting" | "countdown" | "playing" | "gameover";
+
+/** A match starts 1v1; later joiners pick a side, up to two seats per side. */
+export const MAX_SEATS_PER_SIDE = 2;
+export const MAX_PLAYERS = 4;
 
 export interface Ball {
   x: number;
@@ -10,6 +15,10 @@ export interface Ball {
   vx: number;
   vy: number;
   vz: number;
+  /** Side spin: curves the flight laterally. Set by racket x-velocity at contact. */
+  spinSide: number;
+  /** Topspin (positive) dips flight and kicks off the bounce; negative is backspin. */
+  spinTop: number;
 }
 
 /** Racket position in its player's hit plane; driven directly by mouse input. */
@@ -18,32 +27,41 @@ export interface Racket {
   y: number;
 }
 
+/** One player's racket. Seats are created when a player joins, removed when they leave. */
+export interface Seat {
+  /** Stable id for the seat (the owning connection's id on the server). */
+  id: string;
+  side: PlayerIndex;
+  racket: Racket;
+  /** Racket velocity (units/s), tracked server-side from input deltas; feeds spin. */
+  vel: Racket;
+}
+
 export interface GameState {
   ball: Ball;
-  rackets: [Racket, Racket];
+  seats: Seat[];
   scores: [number, number];
   status: MatchStatus;
   /** Seconds remaining before play starts; only meaningful while status is "countdown". */
   countdown: number;
   winner: PlayerIndex | null;
-  /** Who serves the next ball. */
+  /** Which side serves the next ball. */
   server: PlayerIndex;
   /** Seconds until the held ball is served; only meaningful while live is false. */
   serveTimer: number;
   /** True while the ball is in flight. */
   live: boolean;
   lastHitter: PlayerIndex | null;
-  /** True once the last shot has bounced on the receiver's side of the table. */
+  /** True once the last shot has bounced on the receiving side of the table. */
   bouncedSinceHit: boolean;
+  /** True after the net fully blocked the ball; the point resolves when it lands. */
+  netTouched: boolean;
 }
 
 export function createInitialState(): GameState {
   return {
-    ball: { x: 0, y: HIT_HEIGHT, z: 0, vx: 0, vy: 0, vz: 0 },
-    rackets: [
-      { x: 0, y: HIT_HEIGHT },
-      { x: 0, y: HIT_HEIGHT },
-    ],
+    ball: { x: 0, y: HIT_HEIGHT, z: 0, vx: 0, vy: 0, vz: 0, spinSide: 0, spinTop: 0 },
+    seats: [],
     scores: [0, 0],
     status: "waiting",
     countdown: 0,
@@ -53,5 +71,6 @@ export function createInitialState(): GameState {
     live: false,
     lastHitter: null,
     bouncedSinceHit: false,
+    netTouched: false,
   };
 }
