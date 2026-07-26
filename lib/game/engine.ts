@@ -211,7 +211,15 @@ export function step(
     ball.spinTop *= SPIN_DECAY_ON_BOUNCE;
     if (state.lastHitter !== null) {
       const side: PlayerIndex = ball.z < NET_Z ? 0 : 1;
-      if (side !== state.lastHitter) state.bouncedSinceHit = true;
+      if (side !== state.lastHitter) {
+        if (state.bouncedSinceHit) {
+          // Second bounce on the receiving side: the return never came, the
+          // point is over — no striking back after a double bounce.
+          resolveDead(state);
+          return state;
+        }
+        state.bouncedSinceHit = true;
+      }
     }
     // Too weak to bounce again: the ball is rolling on the table ("deflated"),
     // so the point resolves instead of the rally hanging forever.

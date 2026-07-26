@@ -186,6 +186,20 @@ describe("flight", () => {
     expect(state.bouncedSinceHit).toBe(true);
   });
 
+  it("ends the point on the second bounce on the receiving side", () => {
+    const state = liveState();
+    state.lastHitter = 0;
+    state.bouncedSinceHit = true;
+    state.ball.z = NET_Z + 120;
+    state.ball.y = BALL_RADIUS + 1;
+    state.ball.vy = -300;
+    state.ball.vz = 40;
+    step(state, TICK);
+    // The receivers never returned the first bounce: the hitter scores.
+    expect(state.scores).toEqual([1, 0]);
+    expect(state.live).toBe(false);
+  });
+
   it("resolves the point when the ball is too weak to bounce (rolling)", () => {
     const state = liveState();
     state.lastHitter = 0;
