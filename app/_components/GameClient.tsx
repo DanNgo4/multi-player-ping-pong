@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
 import usePartySocket from "partysocket/react";
 import {
   BALL_RADIUS,
@@ -338,6 +339,9 @@ export default function GameClient({ room, intent }: Props) {
 
   return (
     <main className="game">
+      <Link href="/" className="button secondary home-link" data-testid="home-link">
+        ← Lobby
+      </Link>
       <header className="hud">
         <h1 className="match-title" data-testid="match-title">
           {matchTitle(creator, room)}
