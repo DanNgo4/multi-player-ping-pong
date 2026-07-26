@@ -116,6 +116,7 @@ export default function Lobby() {
             {leaderboard(results).map((row) => (
               <li key={row.name}>
                 <span className="match-name">{row.name}</span>
+                <span>{Math.round((row.wins / row.played) * 100)}%</span>
                 <span className="match-players">
                   {row.wins} {row.wins === 1 ? "win" : "wins"} · {row.played} played
                 </span>
@@ -171,7 +172,7 @@ function timeLabel(endedAt: number): string {
   });
 }
 
-/** Wins and games played per display name, most wins first. */
+/** Wins and games played per display name, ranked by win rate. */
 function leaderboard(
   results: MatchResult[],
 ): { name: string; wins: number; played: number }[] {
@@ -186,7 +187,8 @@ function leaderboard(
       }
     });
   }
+  // Equal win rates rank by volume, so 2/2 sits above 1/1.
   return [...rows.values()]
-    .sort((a, b) => b.wins - a.wins || a.played - b.played)
+    .sort((a, b) => b.wins / b.played - a.wins / a.played || b.played - a.played)
     .slice(0, 10);
 }
