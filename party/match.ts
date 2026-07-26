@@ -1,4 +1,9 @@
-import type * as Party from "partykit/server";
+import {
+  getServerByName,
+  Server,
+  type Connection,
+  type ConnectionContext,
+} from "partyserver";
 import { RACKET_MAX_X, RACKET_MAX_Y, TICK_HZ } from "../lib/game/constants";
 import { beginCountdown, clamp, step } from "../lib/game/engine";
 import { createInitialState, type GameState, type PlayerIndex } from "../lib/game/types";
@@ -8,17 +13,25 @@ import {
   type Role,
   type ServerMessage,
 } from "../lib/protocol";
+import type { Env } from "./env";
 
 const LOBBY_ROOM = "index";
 
-export default class MatchServer implements Party.Server {
+export class MatchServer extends Server<Env> {
   state: GameState = createInitialState();
   players = new Map<string, PlayerIndex>();
   loop: ReturnType<typeof setInterval> | null = null;
 
-  constructor(readonly room: Party.Room) {}
+  /**
+   * The base class holds env, but its type lives in the `cloudflare:workers`
+   * ambient module, which we deliberately do not load globally (it conflicts
+   * with the DOM lib used by app code). Runtime property is real.
+   */
+  private get bindings(): Env {
+    return (this as unknown as { env: Env }).env;
+  }
 
-  onConnect(conn: Party.Connection, ctx: Party.ConnectionContext): void {
+  override onConnect(conn: Connection, ctx: ConnectionContext): void {
     const wantsWatch = new URL(ctx.request.url).searchParams.get("intent") === "watch";
     let role: Role = "spectator";
     let playerIndex: PlayerIndex | null = null;
@@ -40,7 +53,8 @@ export default class MatchServer implements Party.Server {
     void this.updateLobby();
   }
 
-  onMessage(raw: string, conn: Party.Connection): void {
+  override onMessage(conn: Connection, raw: string | ArrayBuffer | ArrayBufferView): void {
+    if (typeof raw !== "string") return;
     const msg = parseClientMessage(raw);
     const playerIndex = this.players.get(conn.id);
     // Input is enforced by server-side role: spectators are simply not in the map.
@@ -58,13 +72,13 @@ export default class MatchServer implements Party.Server {
     }
   }
 
-  onClose(conn: Party.Connection): void {
+  override onClose(conn: Connection): void {
     const wasPlayer = this.players.delete(conn.id);
     if (wasPlayer && this.state.status !== "gameover") {
       // A player left mid-match: reset and wait for a new opponent.
       this.state = createInitialState();
     }
-    if ([...this.room.getConnections()].length === 0) {
+    if ([...this.getConnections()].length === 0) {
       if (this.loop) {
         clearInterval(this.loop);
         this.loop = null;
@@ -90,24 +104,24 @@ export default class MatchServer implements Party.Server {
   }
 
   private counts(): { players: number; spectators: number } {
-    const total = [...this.room.getConnections()].length;
+    const total = [...this.getConnections()].length;
     return { players: this.players.size, spectators: total - this.players.size };
   }
 
   private broadcastState(): void {
     const { players, spectators } = this.counts();
     const msg: ServerMessage = { type: "state", state: this.state, players, spectators };
-    this.room.broadcast(JSON.stringify(msg));
+    this.broadcast(JSON.stringify(msg));
   }
 
-  private send(conn: Party.Connection, msg: ServerMessage): void {
+  private send(conn: Connection, msg: ServerMessage): void {
     conn.send(JSON.stringify(msg));
   }
 
   private async updateLobby(gone = false): Promise<void> {
     const { players, spectators } = this.counts();
     const update: LobbyUpdate = {
-      id: this.room.id,
+      id: this.name,
       players,
       spectators,
       scores: this.state.scores,
@@ -115,9 +129,14 @@ export default class MatchServer implements Party.Server {
       ...(gone ? { gone: true } : {}),
     };
     try {
-      await this.room.context.parties.lobby
-        ?.get(LOBBY_ROOM)
-        .fetch({ method: "POST", body: JSON.stringify(update) });
+      const lobby = await getServerByName(
+        this.bindings.lobby as Parameters<typeof getServerByName>[0],
+        LOBBY_ROOM,
+      );
+      await lobby.fetch("https://lobby.internal/", {
+        method: "POST",
+        body: JSON.stringify(update),
+      });
     } catch {
       // The lobby listing is best-effort; never let it break a live match.
     }

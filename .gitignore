@@ -1,6 +1,6 @@
 node_modules/
 .next/
-.partykit/
+.wrangler/
 .vercel/
 next-env.d.ts
 test-results/
@@ -11,3 +11,6 @@ playwright-report/
 .env*
 !.env.example
 *.tsbuildinfo
+
+.vercel
+.env*

@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "multi-player-ping-pong",
+  "main": "party/server.ts",
+  "compatibility_date": "2026-07-01",
+  "durable_objects": {
+    "bindings": [
+      { "name": "main", "class_name": "MatchServer" },
+      { "name": "lobby", "class_name": "LobbyServer" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MatchServer", "LobbyServer"] }],
+  "observability": { "enabled": true }
+}
