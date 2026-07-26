@@ -1,0 +1,13 @@
+node_modules/
+.next/
+.partykit/
+.vercel/
+next-env.d.ts
+test-results/
+playwright-report/
+.playwright-mcp/
+.claude/worktrees/
+.claude/settings.local.json
+.env*
+!.env.example
+*.tsbuildinfo
