@@ -37,8 +37,16 @@ import {
 
 const CANVAS_W = 1200;
 const CANVAS_H = 500;
-/** Canvas backing store is rendered at 2x for crispness on hidpi/mobile. */
-const DPR = 2;
+/**
+ * The backing store is sized from the canvas' measured CSS width rather than a
+ * fixed 2x of the logical size: on a 700px-wide layout a 2400px store burns
+ * fill rate on pixels nobody sees. Device pixel ratio is capped because past
+ * ~1.5x the extra samples are invisible on a fast-moving 2D scene.
+ */
+const MAX_DEVICE_RATIO = 1.5;
+const MAX_PIXEL_WIDTH = 2400;
+/** Draw at most ~60fps; a 120Hz display gains nothing but heat here. */
+const FRAME_MS = 15;
 
 // Perspective camera sitting behind the viewer's end of the table.
 const FOV = 420;
@@ -55,7 +63,7 @@ const MAX_CHAT_LINES = 50;
 const TRAIL_MS = 280;
 
 const CONFETTI_COLORS = ["#ffd166", "#ef476f", "#06d6a0", "#118ab2", "#f3f5f9"];
-const CONFETTI_COUNT = 90;
+const CONFETTI_COUNT = 40;
 
 interface ConfettiBit {
   x: number;
@@ -101,7 +109,23 @@ interface TrailPoint {
   at: number;
 }
 
-/** Records the ball's rendered position into a fading motion trail. */
+/** Trail alpha quantised into buckets: a lookup beats building an rgba string
+ * per point per frame. */
+const TRAIL_STEPS = 8;
+const TRAIL_COLORS: readonly string[] = Array.from(
+  { length: TRAIL_STEPS },
+  (_, i) => `rgba(255, 211, 77, ${(0.35 * (1 - (i + 0.5) / TRAIL_STEPS)).toFixed(3)})`,
+);
+
+/**
+ * Records the ball's rendered position into a fading motion trail.
+ *
+ * One sample per call, and the caller only calls this on frames it actually
+ * draws — so FRAME_MS, not the display refresh rate, is what bounds trail
+ * density (~TRAIL_MS / FRAME_MS points). A 144Hz display gets the same trail
+ * as a 60Hz one. Raising FRAME_MS thins the trail out; that coupling is
+ * deliberate, so there is no second gate here to keep in sync with it.
+ */
 function updateTrail(trail: TrailPoint[], state: GameState, now: number): void {
   if (state.status !== "playing" || !state.live) {
     trail.length = 0;
@@ -217,6 +241,9 @@ interface Props {
 
 export default function GameClient({ room, intent }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  /** Backing-store pixels per logical unit; kept in a ref so the rAF loop reads
+   * the current value without re-subscribing. */
+  const pixelScaleRef = useRef(1);
   const chatLogRef = useRef<HTMLDivElement | null>(null);
   const prevSnapRef = useRef<Snapshot | null>(null);
   const curSnapRef = useRef<Snapshot>({ state: createInitialState(), at: 0 });
@@ -382,25 +409,85 @@ export default function GameClient({ room, intent }: Props) {
     };
   }, [role, side, sendMessage]);
 
+  // Size the backing store to the canvas' real on-screen width. Resizing a
+  // canvas clears it, which is free here because every frame repaints in full.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const resize = (cssWidth: number) => {
+      if (cssWidth <= 0) return;
+      const ratio = Math.min(window.devicePixelRatio || 1, MAX_DEVICE_RATIO);
+      const pixelWidth = Math.min(MAX_PIXEL_WIDTH, Math.round(cssWidth * ratio));
+      if (pixelWidth === canvas.width) return;
+      canvas.width = pixelWidth;
+      // Floor, never round: one uniform scale drives both axes, so a height
+      // rounded *up* would leave an unpainted row at the bottom edge.
+      canvas.height = Math.max(1, Math.floor((pixelWidth * CANVAS_H) / CANVAS_W));
+      pixelScaleRef.current = pixelWidth / CANVAS_W;
+    };
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[entries.length - 1];
+      resize(entry ? entry.contentRect.width : canvas.clientWidth);
+    });
+    observer.observe(canvas);
+    resize(canvas.clientWidth);
+
+    // Dragging the window to a monitor with a different pixel density leaves
+    // the CSS box exactly as it was, so the observer never fires and the
+    // backing store keeps the old ratio. A resolution media query is the only
+    // notification for that; it matches one specific ratio, so it has to be
+    // re-registered against the new value every time it changes.
+    let ratioQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const onRatioChange = () => {
+      ratioQuery.removeEventListener("change", onRatioChange);
+      ratioQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      ratioQuery.addEventListener("change", onRatioChange);
+      resize(canvas.clientWidth);
+    };
+    ratioQuery.addEventListener("change", onRatioChange);
+
+    return () => {
+      observer.disconnect();
+      ratioQuery.removeEventListener("change", onRatioChange);
+    };
+  }, []);
+
   // Render loop: draws the latest snapshot, interpolated from the previous one.
   useEffect(() => {
-    const ctx = canvasRef.current?.getContext("2d");
+    // Opaque context: the room fills every pixel, so compositing the canvas
+    // against the page underneath is wasted work.
+    const ctx = canvasRef.current?.getContext("2d", { alpha: false });
     if (!ctx) return;
     let raf = 0;
     const trail: TrailPoint[] = [];
     const confetti: ConfettiBit[] = [];
-    let lastNow = performance.now();
-    const draw = () => {
+    // Gate clock, quantised to whole FRAME_MS periods. Snapping it to the
+    // current time instead would leave only ~1.6ms of slack at 60Hz, so a
+    // callback running 2ms late would push the next one under the threshold
+    // and drop a frame outright — worst exactly when the thread is busy.
+    // Letting it lag keeps every 60Hz frame above the bar.
+    let frameClock = performance.now() - FRAME_MS;
+    let lastDrawnAt = performance.now();
+    // `now` is the rAF timestamp (frame start), not performance.now() at
+    // callback entry: same clock origin, without the scheduling jitter.
+    const draw = (now: number) => {
+      // Scheduling stays unconditional; only the drawing is rate-limited.
+      raf = requestAnimationFrame(draw);
+      const sinceGate = now - frameClock;
+      if (sinceGate < FRAME_MS) return;
+      frameClock += FRAME_MS * Math.floor(sinceGate / FRAME_MS);
       const viewerSide = sideRef.current ?? viewEndRef.current;
       const localRacket = roleRef.current === "player" ? racketRef.current : null;
-      const now = performance.now();
-      const dt = Math.min((now - lastNow) / 1000, 0.1);
-      lastNow = now;
+      // Animation advances on real time between drawn frames, not on the
+      // quantised gate clock.
+      const dt = Math.min((now - lastDrawnAt) / 1000, 0.1);
+      lastDrawnAt = now;
       const view = interpolate(prevSnapRef.current, curSnapRef.current, now);
       updateTrail(trail, view, now);
       updateConfetti(confetti, dt, view.status === "gameover" && view.winner !== null);
       drawFrame(
         ctx,
+        pixelScaleRef.current,
         view,
         namesRef.current,
         viewerSide,
@@ -410,7 +497,6 @@ export default function GameClient({ room, intent }: Props) {
         now,
         confetti,
       );
-      raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
@@ -499,8 +585,8 @@ export default function GameClient({ room, intent }: Props) {
         <div className="stage">
           <canvas
             ref={canvasRef}
-            width={CANVAS_W * DPR}
-            height={CANVAS_H * DPR}
+            width={CANVAS_W}
+            height={CANVAS_H}
             data-testid="court"
           />
           <div className="stage-controls">
@@ -617,6 +703,7 @@ function statusLabel(
 
 function drawFrame(
   ctx: CanvasRenderingContext2D,
+  scale: number,
   state: GameState,
   names: SeatNames,
   viewerSide: PlayerIndex,
@@ -626,7 +713,9 @@ function drawFrame(
   now = 0,
   confetti: readonly ConfettiBit[] = [],
 ): void {
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // Everything below draws in logical 1200x500 space; the transform maps that
+  // onto whatever backing store the observer sized.
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
   const flip = viewerSide === 1;
   const halfW = TABLE_WIDTH / 2;
 
@@ -718,7 +807,8 @@ function drawFrame(
     for (const point of trail) {
       const age = Math.min((now - point.at) / TRAIL_MS, 1);
       const p = project(point.x, point.y, point.z, flip);
-      ctx.fillStyle = `rgba(255, 211, 77, ${(0.35 * (1 - age)).toFixed(3)})`;
+      ctx.fillStyle =
+        TRAIL_COLORS[Math.min(TRAIL_STEPS - 1, (age * TRAIL_STEPS) | 0)] ?? "#ffd34d";
       ctx.beginPath();
       ctx.arc(
         p.x,
@@ -762,14 +852,23 @@ function drawFrame(
 
   // Win celebration: confetti rain and a pulsing winner banner.
   if (state.status === "gameover" && state.winner !== null) {
+    // One setTransform per bit instead of save/translate/rotate/restore: the
+    // matrix is the base scale composed with the bit's rotation and position.
     for (const bit of confetti) {
-      ctx.save();
-      ctx.translate(bit.x + Math.sin(bit.phase) * bit.sway, bit.y);
-      ctx.rotate(bit.phase);
+      const cos = Math.cos(bit.phase);
+      const sin = Math.sin(bit.phase);
+      ctx.setTransform(
+        scale * cos,
+        scale * sin,
+        -scale * sin,
+        scale * cos,
+        scale * (bit.x + sin * bit.sway),
+        scale * bit.y,
+      );
       ctx.fillStyle = bit.color;
       ctx.fillRect(-bit.size / 2, -bit.size / 4, bit.size, bit.size / 2);
-      ctx.restore();
     }
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
     const members = state.seats
       .map((seat, i) =>
         seat.side === state.winner ? (names[i] ?? `Player ${i + 1}`) : null,
@@ -777,13 +876,20 @@ function drawFrame(
       .filter((n): n is string => n !== null);
     const label = members.length > 0 ? members.join(" & ") : `Team ${state.winner + 1}`;
     const pulse = 1 + 0.06 * Math.sin(now / 180);
+    const banner = `${label} WINS!`;
     ctx.textAlign = "center";
-    ctx.font = `bold ${Math.round(58 * pulse)}px system-ui`;
-    ctx.lineWidth = 8;
-    ctx.strokeStyle = "rgba(6, 10, 20, 0.75)";
-    ctx.strokeText(`${label} WINS!`, CX, 210);
+    // A constant font string keeps the glyph cache warm; the pulse rides on the
+    // transform instead. An offset dark copy stands in for the old strokeText,
+    // which re-tessellated the outline of every glyph each frame.
+    ctx.font = "bold 58px system-ui";
+    ctx.save();
+    ctx.translate(CX, 210);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = "rgba(6, 10, 20, 0.75)";
+    ctx.fillText(banner, 3, 3);
     ctx.fillStyle = "#ffd166";
-    ctx.fillText(`${label} WINS!`, CX, 210);
+    ctx.fillText(banner, 0, 0);
+    ctx.restore();
   }
 }
 
