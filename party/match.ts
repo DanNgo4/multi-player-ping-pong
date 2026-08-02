@@ -9,6 +9,7 @@ import {
   MAX_RACKET_SPEED,
   RACKET_MAX_X,
   RACKET_MAX_Y,
+  RENDER_LAG_TICKS,
   TICK_HZ,
 } from "../lib/game/constants";
 import {
@@ -338,7 +339,9 @@ export class MatchServer extends Server<Env> {
     // rally must never satisfy a compensated hit check.
     if (this.state.live) {
       this.ballTrail.unshift({ ...this.state.ball });
-      if (this.ballTrail.length > MAX_LAG_TICKS) this.ballTrail.pop();
+      // Deep enough for the worst allowed ping plus the fixed client render
+      // delay every player's hit checks look back through.
+      if (this.ballTrail.length > MAX_LAG_TICKS + RENDER_LAG_TICKS) this.ballTrail.pop();
     } else if (this.ballTrail.length > 0) {
       this.ballTrail = [];
     }

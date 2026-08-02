@@ -22,13 +22,18 @@ import {
   PLAYER_Z,
   POWER_BOOST,
   RACKET_VEL_DECAY,
+  RENDER_LAG_TICKS,
   SERVE_DELAY,
   SHOT_LIFT,
   SHOT_SPEED_Z,
+  SPIN_AIR_DECAY,
   SPIN_BOUNCE_KICK,
+  SPIN_CARRY,
   SPIN_DECAY_ON_BOUNCE,
   SPIN_FACTOR,
   SPIN_LIFT_TILT,
+  SPIN_RECEIVE_LIFT,
+  SPIN_RECEIVE_SIDE,
   TABLE_LENGTH,
   TABLE_RESTITUTION,
   TABLE_WIDTH,
@@ -46,6 +51,21 @@ import {
 
 /** Injectable randomness source so the engine stays deterministic under test. */
 export type Rand = () => number;
+
+/**
+ * How many ticks into the past a seat's hit checks look.
+ *
+ * `lagTicks` covers that player's measured network delay. On top of it every
+ * player — even one on a perfect connection — is looking at a stale ball:
+ * the client renders it interpolated between the two latest snapshots, which
+ * lands one whole snapshot interval behind the server, and racket positions
+ * only leave the client on its own ~1-tick cadence. RENDER_LAG_TICKS pays back
+ * that fixed client-side delay so the server tests the ball where the player
+ * actually saw it when they moved the racket.
+ */
+function seatLookback(seat: Seat): number {
+  return seat.lagTicks + RENDER_LAG_TICKS;
+}
 
 export function opponent(i: PlayerIndex): PlayerIndex {
   return i === 0 ? 1 : 0;
@@ -125,9 +145,9 @@ export function resetScores(state: GameState): void {
  * Advances the match by dt seconds. Mutates and returns the same state object.
  *
  * `ballTrail` is the recent history of ball positions (index 0 = one tick
- * ago), used for lag compensation: a seat with lagTicks > 0 gets its hit
- * checks run against the ball where it was when that player's screen showed
- * it, so high-ping players hit what they actually saw.
+ * ago), used for lag compensation: hit checks run against the ball where it
+ * was when that player's screen showed it, so players hit what they actually
+ * saw. See `seatLookback` for how far back that is.
  */
 export function step(
   state: GameState,
@@ -173,6 +193,11 @@ export function step(
   ball.vx += ball.spinSide * MAGNUS_SIDE * travel * dt;
   // Backspin float is halved so a chopped ball hangs but never soars upward.
   ball.vy -= ball.spinTop * MAGNUS_TOP * (ball.spinTop > 0 ? 1 : 0.5) * dt;
+  // Air drags on the rotation too, so spin bleeds away over the flight. This
+  // must stay in step with the same decay inside serveIsLegal().
+  const spinDecay = Math.max(0, 1 - SPIN_AIR_DECAY * dt);
+  ball.spinSide *= spinDecay;
+  ball.spinTop *= spinDecay;
   ball.x += ball.vx * dt;
   ball.y += ball.vy * dt;
   ball.z += ball.vz * dt;
@@ -237,9 +262,9 @@ export function step(
   }
 
   // Racket hits: any seat on the side the ball is heading toward may return
-  // it. A lagged seat probes the ball where it was lagTicks ago instead.
+  // it, probing the ball where that player's screen showed it.
   for (const seat of state.seats) {
-    const lag = Math.min(seat.lagTicks, ballTrail.length);
+    const lag = Math.min(seatLookback(seat), ballTrail.length);
     const probe = lag > 0 ? (ballTrail[lag - 1] ?? ball) : ball;
     const plane = PLAYER_Z[seat.side];
     const toward = seat.side === 0 ? probe.vz < 0 : probe.vz > 0;
@@ -255,23 +280,28 @@ export function step(
     ) {
       continue;
     }
-    // The return leaves from where this player saw the ball.
+    // The return leaves from where — and from when — this player saw the ball,
+    // so the spin it meets is the spin the probed snapshot carried too.
     ball.x = probe.x;
     ball.y = probe.y;
     ball.z = plane + (seat.side === 0 ? 10 : -10);
-    shoot(state, seat, dx, rand);
+    shoot(state, seat, dx, probe, rand);
     state.lastHitter = seat.side;
     state.bouncedSinceHit = false;
     break;
   }
 
-  // Dead ball: fell below the table, or flew past a racket plane. A side with
-  // a lagged player keeps a grace window past its plane — the ball isn't ruled
-  // dead while a compensated hit could still legitimately connect.
+  // Dead ball: fell below the table, or flew past a racket plane. A side keeps
+  // a grace window past its plane so the ball isn't ruled dead while a
+  // compensated hit could still legitimately connect. It has to cover the
+  // whole lookback the hit checks use, not just measured ping: the probe
+  // trails the live ball by that many ticks, so killing the ball at
+  // MISS_MARGIN alone would throw away the tail of every player's probe
+  // window — including a player on a perfect connection.
   const grace = (side: PlayerIndex): number => {
     let ticks = 0;
     for (const seat of state.seats) {
-      if (seat.side === side) ticks = Math.max(ticks, seat.lagTicks);
+      if (seat.side === side) ticks = Math.max(ticks, seatLookback(seat));
     }
     return ticks * dt * Math.abs(ball.vz);
   };
@@ -293,21 +323,65 @@ function servingSeat(state: GameState): Seat | null {
   return mates[state.serveTurns[state.server] % mates.length] ?? null;
 }
 
-function shoot(state: GameState, seat: Seat, contactOffsetX: number, rand: Rand): void {
+/**
+ * Launches the return. `seen` is the ball as the striking player saw it — the
+ * lag-compensated snapshot the contact was judged against — so the spin the
+ * blade meets is read from there rather than from the live ball, which may be
+ * several ticks and a good chunk of SPIN_AIR_DECAY further on.
+ */
+function shoot(
+  state: GameState,
+  seat: Seat,
+  contactOffsetX: number,
+  seen: Ball,
+  rand: Rand,
+): void {
+  const ball = state.ball;
   const dir = seat.side === 0 ? 1 : -1;
+  // Side spin bends the flight along the direction of travel, so the way this
+  // ball was actually drifting is its side spin taken against its own heading.
+  const inSide = seen.spinSide;
+  const inTop = seen.spinTop;
+  const inDrift = inSide * -dir;
   // A moving racket brushes spin onto the ball: lateral movement gives side
   // spin, upward movement gives topspin (downward chop gives backspin) —
   // and overall swipe speed adds raw shot power.
   const swipe = Math.min(Math.hypot(seat.vel.x, seat.vel.y) / MAX_RACKET_SPEED, 1);
   const spinTop = clamp(seat.vel.y * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
-  state.ball.vz = SHOT_SPEED_Z * dir * (1 + swipe * POWER_BOOST);
-  // Topspin shots launch flatter, backspin shots float higher.
-  state.ball.vy = SHOT_LIFT - spinTop * SPIN_LIFT_TILT;
-  state.ball.vx =
-    clamp(contactOffsetX * AIM_FACTOR, -MAX_SIDE_SPEED, MAX_SIDE_SPEED) +
+  ball.vz = SHOT_SPEED_Z * dir * (1 + swipe * POWER_BOOST);
+  // Topspin shots launch flatter, backspin shots float higher. On top of that
+  // the incoming ball's own spin fights the blade: its topspin climbs off the
+  // face and carries long, its backspin drags the return down toward the net.
+  // A heavy ball therefore has to be answered with the swipe, not blocked.
+  ball.vy = SHOT_LIFT - spinTop * SPIN_LIFT_TILT + inTop * SPIN_RECEIVE_LIFT;
+  // Side spin pushes the return on the way the incoming ball was curving, so
+  // a hooking ball has to be aimed against.
+  ball.vx =
+    clamp(
+      contactOffsetX * AIM_FACTOR + inDrift * SPIN_RECEIVE_SIDE,
+      -MAX_SIDE_SPEED,
+      MAX_SIDE_SPEED,
+    ) +
     (rand() * 2 - 1) * 30;
-  state.ball.spinSide = clamp(seat.vel.x * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
-  state.ball.spinTop = spinTop;
+  // The blade never stops the ball rotating, so a share of the incoming spin
+  // rides back out with the hitter's own swipe spin brushed on top. The two
+  // axes carry with opposite signs, because they are parameterised differently
+  // against the direction of travel:
+  //
+  //   spinSide is travel-relative — the Magnus term multiplies it by
+  //   sign(vz) — so once the return reverses vz, an unchanged value already
+  //   bends the ball the other way in world terms. That is exactly what a
+  //   conserved rotation does, so the carry keeps its sign.
+  //
+  //   spinTop is not travel-scaled: positive always means dip, whichever way
+  //   the ball is going. Nothing flips on its own, so the reversal has to be
+  //   written in — the opponent's topspin comes back to them as backspin.
+  ball.spinSide = clamp(
+    seat.vel.x * SPIN_FACTOR + inSide * SPIN_CARRY,
+    -MAX_SPIN,
+    MAX_SPIN,
+  );
+  ball.spinTop = clamp(spinTop - inTop * SPIN_CARRY, -MAX_SPIN, MAX_SPIN);
 }
 
 /**
@@ -385,14 +459,22 @@ function serveIsLegal(
   let vx = vx0;
   let vy = vy0;
   const vz = vz0;
+  // Spin fades in the air exactly as it does in `step`, so the flight this
+  // predicts is the flight the serve actually takes. Decay never flips a sign,
+  // so the float factor stays fixed for the whole simulation.
+  let curSide = spinSide;
+  let curTop = spinTop;
+  const spinDecay = Math.max(0, 1 - SPIN_AIR_DECAY * dt);
   const floatFactor = spinTop > 0 ? 1 : 0.5;
   const travel = Math.sign(vz) || 1;
   for (let i = 0; i < TICK_HZ * 3; i++) {
     const prevY = y;
     const prevZ = z;
     vy -= GRAVITY * dt;
-    vx += spinSide * MAGNUS_SIDE * travel * dt;
-    vy -= spinTop * MAGNUS_TOP * floatFactor * dt;
+    vx += curSide * MAGNUS_SIDE * travel * dt;
+    vy -= curTop * MAGNUS_TOP * floatFactor * dt;
+    curSide *= spinDecay;
+    curTop *= spinDecay;
     x += vx * dt;
     y += vy * dt;
     z += vz * dt;

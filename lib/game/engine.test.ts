@@ -2,13 +2,20 @@ import { describe, expect, it } from "vitest";
 import {
   BALL_RADIUS,
   COUNTDOWN_SECONDS,
+  MAX_SPIN,
   MISS_MARGIN,
   NET_HEIGHT,
   NET_Z,
   PLAYER_Z,
+  RACKET_VEL_DECAY,
+  RENDER_LAG_TICKS,
   SERVE_DELAY,
   SHOT_SPEED_Z,
+  SPIN_AIR_DECAY,
+  SPIN_CARRY,
+  SPIN_FACTOR,
   TABLE_LENGTH,
+  TABLE_WIDTH,
   WIN_SCORE,
 } from "./constants";
 import {
@@ -162,6 +169,37 @@ describe("countdown and serve", () => {
     expect(serveLandsIn(state)).toBe(true);
   });
 
+  it("keeps every served spin honest: what serveIsLegal predicts, the ball does", () => {
+    // serveIsLegal pre-simulates the flight to pick a spin scale, and that
+    // simulation has to decay spin exactly as `step` does. If the two drift,
+    // a serve passed as legal flies long (or legal spin gets needlessly
+    // scaled away), so sweep the swipe space and check every serve lands in.
+    for (const x of [-900, -450, 0, 450, 900]) {
+      for (const y of [-900, -450, 0, 450, 900]) {
+        const state = seatedState();
+        state.status = "playing";
+        state.live = false;
+        state.serveTimer = 0.01;
+        state.seats[0]!.vel = { x, y };
+        step(state, TICK);
+        expect(state.live).toBe(true);
+        expect(serveLandsIn(state)).toBe(true);
+      }
+    }
+
+    // ...and it must not be over-cautious either. A pre-sim that forgot to
+    // decay would over-predict the curve, judge this ordinary swipe illegal
+    // and quietly serve it at a lower spin scale instead.
+    const state = seatedState();
+    state.status = "playing";
+    state.live = false;
+    state.serveTimer = 0.01;
+    state.seats[0]!.vel = { x: 0, y: 600 };
+    step(state, TICK);
+    const swipeAtContact = 600 * (1 - RACKET_VEL_DECAY * TICK);
+    expect(state.ball.spinTop).toBeCloseTo(swipeAtContact * SPIN_FACTOR, 6);
+  });
+
   it("holds the ball on the serving player's racket before the serve", () => {
     const state = seatedState();
     state.status = "playing";
@@ -287,6 +325,51 @@ describe("racket hits", () => {
     expect(state.ball.vz).toBe(SHOT_SPEED_Z);
   });
 
+  // Regression: balls crossing fast out by the sidelines used to phase through
+  // the blade. The client draws the ball a couple of ticks behind the server,
+  // so a racket put exactly where the ball looked was compared against a ball
+  // that had already travelled on — harmless head-on, but out at the edges the
+  // lateral speed turned that delay into a clean miss.
+  describe("edge phasing", () => {
+    // Ball crossing the sideline area at speed, racket placed on the ball as
+    // the client drew it RENDER_LAG_TICKS ago.
+    const edgeSwing = (racketX: number): GameState => {
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.y = 50;
+      state.ball.vy = 0;
+      state.ball.vx = 900;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.ball.x = 200;
+      state.ball.z = PLAYER_Z[0] - 8;
+      state.seats[0]!.racket = { x: racketX, y: 50 };
+      // Newest first, 30 units of x and 18 of z per tick. The server ends this
+      // tick with the ball at x=230; two ticks back — what the client drew —
+      // it was at x=170, a clear 60 wide of that.
+      const trail = [0, 1, 2].map((k) => ({
+        ...state.ball,
+        x: 200 - k * 30,
+        z: PLAYER_Z[0] - 8 + k * 18,
+      }));
+      step(state, TICK, () => 0.5, trail);
+      return state;
+    };
+
+    it("connects on a ball out at the table edge, where the player saw it", () => {
+      const state = edgeSwing(170);
+      expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+      expect(state.lastHitter).toBe(0);
+    });
+
+    it("still misses a ball genuinely out of reach at the edge", () => {
+      // Same swing, but the racket is a blade-width too far inside even of
+      // where the ball was drawn.
+      const state = edgeSwing(90);
+      expect(state.ball.vz).toBe(-SHOT_SPEED_Z);
+      expect(state.lastHitter).toBe(1);
+    });
+  });
+
   it("lag compensation: a lagged seat hits the ball where it saw it", () => {
     const state = liveState();
     state.lastHitter = 1;
@@ -305,20 +388,307 @@ describe("racket hits", () => {
     expect(state.lastHitter).toBe(0);
   });
 
-  it("no compensation without lagTicks: the same late swing misses", () => {
+  it("compensation is bounded: a swing older than the seat's lookback misses", () => {
+    // A ball crossing fast sideways, with the racket parked where it was four
+    // ticks ago. A seat on a clean connection looks back RENDER_LAG_TICKS and
+    // cannot reach that far; measured ping buys the extra reach.
+    const lateSwing = (lagTicks: number): number => {
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.x = 200;
+      state.ball.y = 60;
+      state.ball.z = PLAYER_Z[0] + 10;
+      state.ball.vx = 600;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.seats[0]!.racket = { x: 0, y: 60 };
+      state.seats[0]!.lagTicks = lagTicks;
+      const trail = [1, 2, 3, 4].map((k) => ({
+        ...state.ball,
+        x: 200 - k * 50,
+        z: PLAYER_Z[0],
+      }));
+      step(state, TICK, () => 0.5, trail);
+      return state.ball.vz;
+    };
+    expect(RENDER_LAG_TICKS).toBe(2);
+    // Two ticks back the ball was still 100 wide of the blade.
+    expect(lateSwing(0)).toBe(-SHOT_SPEED_Z);
+    // Four ticks back it was right on it.
+    expect(lateSwing(2)).toBe(SHOT_SPEED_Z);
+  });
+
+  // The spin already on the ball fights the blade, so a return is shaped by
+  // what the opponent put on it, not just by the hitter's own swipe.
+  describe("receiving spin", () => {
+    // Side 0 returns a ball arriving with the given spin, with the racket
+    // swiping at the given velocity. Returns the launched ball.
+    const returnOf = (spinSide: number, spinTop: number, vel = { x: 0, y: 0 }) => {
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.x = 0;
+      state.ball.y = 50;
+      state.ball.z = PLAYER_Z[0] + 20;
+      state.ball.vy = 0;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.ball.spinSide = spinSide;
+      state.ball.spinTop = spinTop;
+      state.seats[0]!.racket = { x: 0, y: 50 };
+      state.seats[0]!.vel = { ...vel };
+      step(state, TICK, () => 0.5);
+      expect(state.lastHitter).toBe(0);
+      return { ...state.ball };
+    };
+
+    it("kicks the return up off an incoming topspin ball", () => {
+      expect(returnOf(0, MAX_SPIN).vy).toBeGreaterThan(returnOf(0, 0).vy);
+    });
+
+    it("drops the return of an incoming backspin ball", () => {
+      expect(returnOf(0, -MAX_SPIN).vy).toBeLessThan(returnOf(0, 0).vy);
+    });
+
+    it("deflects the return the way the incoming side spin was curving", () => {
+      const flat = returnOf(0, 0).vx;
+      // Arriving at side 0, positive side spin bends the ball toward -x, and
+      // the return is pushed along with it — by far more than the contact
+      // point alone drifts during the tick.
+      expect(flat - returnOf(MAX_SPIN, 0).vx).toBeGreaterThan(40);
+      expect(returnOf(-MAX_SPIN, 0).vx - flat).toBeGreaterThan(40);
+    });
+
+    it("mirrors the deflection for the player on the far side", () => {
+      // Side 1 receives the same spin travelling the other way, so the same
+      // side spin must push its return the opposite way.
+      const forSide1 = (spinSide: number): number => {
+        const state = liveState();
+        state.lastHitter = 0;
+        state.ball.x = 0;
+        state.ball.y = 50;
+        state.ball.z = PLAYER_Z[1] - 20;
+        state.ball.vy = 0;
+        state.ball.vz = SHOT_SPEED_Z;
+        state.ball.spinSide = spinSide;
+        state.seats[1]!.racket = { x: 0, y: 50 };
+        step(state, TICK, () => 0.5);
+        expect(state.lastHitter).toBe(1);
+        return state.ball.vx;
+      };
+      expect(forSide1(MAX_SPIN) - forSide1(0)).toBeGreaterThan(40);
+    });
+
+    it("lets a deliberate counter-swipe cancel the incoming lift", () => {
+      const flat = returnOf(0, 0).vy;
+      const uncountered = returnOf(0, MAX_SPIN).vy;
+      // Swiping up brushes the hitter's own topspin on, which launches flatter
+      // (SPIN_LIFT_TILT) and pays back what the incoming ball added — all but
+      // a sliver of it, the ball having shed a little spin on the way in.
+      const countered = returnOf(0, MAX_SPIN, { x: 0, y: 630 }).vy;
+      expect(uncountered).toBeGreaterThan(flat);
+      expect(Math.abs(countered - flat)).toBeLessThan(Math.abs(uncountered - flat) * 0.1);
+    });
+
+    it("carries part of the incoming spin back, negating only the topspin", () => {
+      // A still bat does not stop the ball rotating. The two axes are stored
+      // differently against the direction of travel, so a conserved rotation
+      // carries with opposite signs: spinTop has to be negated by hand, while
+      // spinSide is already travel-relative and keeps its value.
+      // The ball spends one tick in the air before contact, so what the blade
+      // meets is already one step of SPIN_AIR_DECAY down from MAX_SPIN.
+      const atContact = MAX_SPIN * (1 - SPIN_AIR_DECAY * TICK);
+      expect(returnOf(0, MAX_SPIN).spinTop).toBeLessThan(-50);
+      expect(returnOf(0, MAX_SPIN).spinTop).toBeCloseTo(-atContact * SPIN_CARRY, 6);
+      expect(returnOf(MAX_SPIN, 0).spinSide).toBeGreaterThan(50);
+      expect(returnOf(MAX_SPIN, 0).spinSide).toBeCloseTo(atContact * SPIN_CARRY, 6);
+      // The hitter's own swipe spin is added on top of that carry.
+      const swiped = returnOf(0, MAX_SPIN, { x: 0, y: 630 }).spinTop;
+      expect(swiped).toBeGreaterThan(-MAX_SPIN * SPIN_CARRY);
+    });
+
+    it("flips which way a blocked side-spin ball bends", () => {
+      // The world-frame consequence of carrying spinSide unchanged: the return
+      // travels the other way, so the same stored spin now curves it the
+      // opposite way. Getting this sign wrong makes a blocked ball keep
+      // hooking the way it already was.
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.x = 0;
+      state.ball.y = 50;
+      state.ball.z = PLAYER_Z[0] + 20;
+      state.ball.vy = 0;
+      state.ball.vz = -SHOT_SPEED_Z;
+      // Heading toward side 0, this spin drags the ball toward -x.
+      state.ball.spinSide = MAX_SPIN;
+      state.seats[0]!.racket = { x: 0, y: 50 };
+      step(state, TICK, () => 0.5);
+      expect(state.lastHitter).toBe(0);
+      expect(state.ball.spinSide).toBeGreaterThan(0);
+      // Now heading back, the carried spin must bend it toward +x instead.
+      const vxAtLaunch = state.ball.vx;
+      step(state, TICK, () => 0.5);
+      expect(state.ball.vx).toBeGreaterThan(vxAtLaunch);
+    });
+
+    it("keeps a flat return of a maximum-spin ball playable", () => {
+      // Heavy spin must perturb a dead-bat return, never win the point outright.
+      for (const [spinSide, spinTop] of [
+        [0, MAX_SPIN],
+        [0, -MAX_SPIN],
+        [MAX_SPIN, 0],
+        [-MAX_SPIN, 0],
+      ]) {
+        const state = liveState();
+        state.lastHitter = 1;
+        state.ball.x = 0;
+        state.ball.y = 50;
+        state.ball.z = PLAYER_Z[0] + 20;
+        state.ball.vy = 0;
+        state.ball.vz = -SHOT_SPEED_Z;
+        state.ball.spinSide = spinSide!;
+        state.ball.spinTop = spinTop!;
+        state.seats[0]!.racket = { x: 0, y: 50 };
+        step(state, TICK, () => 0.5);
+        expect(state.lastHitter).toBe(0);
+        // The return must land on the far half rather than fly out or net.
+        let landed: { x: number; z: number } | null = null;
+        for (let i = 0; i < 120 && landed === null; i++) {
+          const before = { ...state.ball };
+          step(state, TICK, () => 0.5);
+          if (state.bouncedSinceHit) landed = { x: before.x, z: before.z };
+          if (state.scores[0] !== 0 || state.scores[1] !== 0) break;
+        }
+        expect(landed).not.toBeNull();
+        expect(landed!.z).toBeGreaterThan(NET_Z);
+        expect(landed!.z).toBeLessThan(TABLE_LENGTH);
+        expect(Math.abs(landed!.x)).toBeLessThan(TABLE_WIDTH / 2);
+      }
+    });
+
+    it("bleeds spin off the ball while it flies", () => {
+      // Parked high above the table with no z travel, so nothing but air drag
+      // touches the rotation — no bounce, no net, no racket.
+      const state = liveState();
+      state.ball.x = 0;
+      state.ball.y = 1200;
+      state.ball.z = NET_Z;
+      state.ball.vx = 0;
+      state.ball.vy = 0;
+      state.ball.vz = 0;
+      state.ball.spinTop = MAX_SPIN;
+      state.ball.spinSide = MAX_SPIN;
+      for (let t = 0; t < 1; t += TICK) step(state, TICK);
+      // A second in the air is a little under one half-life (~1.15 s).
+      expect(state.ball.spinTop).toBeLessThan(MAX_SPIN * 0.6);
+      expect(state.ball.spinTop).toBeGreaterThan(MAX_SPIN * 0.4);
+      // Both axes drag alike.
+      expect(state.ball.spinSide).toBeCloseTo(state.ball.spinTop, 6);
+    });
+
+    it("gives a ball that has floated a full crossing less bite than a fresh one", () => {
+      // Same spin at launch, but this one flies the length of the table first,
+      // staying high so only the air — not a bounce — takes spin off it.
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.x = 0;
+      state.ball.y = 200;
+      state.ball.z = PLAYER_Z[1] - 10;
+      state.ball.vx = 0;
+      state.ball.vy = 700;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.ball.spinTop = MAX_SPIN;
+      // Out of reach until it arrives.
+      state.seats[0]!.racket = { x: 9999, y: 0 };
+      let ticks = 0;
+      while (state.ball.z > PLAYER_Z[0] + 20 && ticks < 120) {
+        step(state, TICK, () => 0.5);
+        ticks += 1;
+      }
+      const spinOnArrival = state.ball.spinTop;
+      expect(state.bouncedSinceHit).toBe(false);
+      expect(spinOnArrival).toBeLessThan(MAX_SPIN * 0.65);
+      // Put the bat on it and return it.
+      state.seats[0]!.racket = { x: state.ball.x, y: state.ball.y };
+      step(state, TICK, () => 0.5);
+      expect(state.lastHitter).toBe(0);
+      // Less spin left means less of a kick off the blade than a fresh ball.
+      expect(state.ball.vy).toBeLessThan(returnOf(0, MAX_SPIN).vy);
+      // ...but the return still carries the reversed remnant of it.
+      expect(state.ball.spinTop).toBeLessThan(0);
+    });
+
+    it("leaves the serve untouched by spin left on the previous ball", () => {
+      // Serves are held fresh and simulate flight only, so the contact model
+      // never reaches them.
+      const state = seatedState();
+      state.status = "playing";
+      state.live = false;
+      state.serveTimer = 0.01;
+      state.ball.spinSide = MAX_SPIN;
+      state.ball.spinTop = -MAX_SPIN;
+      step(state, TICK);
+      expect(state.live).toBe(true);
+      expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+      expect(state.ball.spinSide).toBe(0);
+      expect(state.ball.spinTop).toBe(0);
+    });
+  });
+
+  it("keeps the whole probe window usable, not just up to MISS_MARGIN", () => {
+    // The probe trails the live ball by the same lookback the hit checks use,
+    // so the dead-ball grace has to cover it. If it only covered measured
+    // ping, a ball on a clean connection would be killed while its probe was
+    // still on the blade — the tail of every player's window.
+    const fast = SHOT_SPEED_Z * 1.5;
+    const state = liveState();
+    state.lastHitter = 1;
+    state.bouncedSinceHit = true;
+    state.ball.x = 0;
+    state.ball.y = 50;
+    state.ball.vy = 0;
+    state.ball.vz = -fast;
+    state.seats[0]!.racket = { x: 0, y: 50 };
+    const seen = (x: number, z: number) => ({ ...state.ball, x, y: 50, z });
+
+    // Tick one: already past MISS_MARGIN, and this tick's probe is wide of the
+    // blade, so nothing connects. The ball must survive anyway.
+    state.ball.z = PLAYER_Z[0] - 38;
+    step(state, TICK, () => 0.5, [
+      seen(0, PLAYER_Z[0] - 38),
+      seen(300, PLAYER_Z[0] - 11),
+    ]);
+    expect(state.scores).toEqual([0, 0]);
+
+    // Tick two: the probe has caught up to the racket and the return lands.
+    step(state, TICK, () => 0.5, [
+      seen(0, PLAYER_Z[0] - 65),
+      seen(0, PLAYER_Z[0] - 38),
+    ]);
+    expect(state.lastHitter).toBe(0);
+    expect(state.scores).toEqual([0, 0]);
+  });
+
+  it("reads the spin off the probed snapshot, not the live ball", () => {
+    // Contact is judged against the ball the player saw, so the spin the blade
+    // meets has to come from that same snapshot. The live ball has flown on
+    // and shed spin to SPIN_AIR_DECAY since.
     const state = liveState();
     state.lastHitter = 1;
     state.ball.x = 0;
-    state.ball.y = 60;
-    state.ball.z = PLAYER_Z[0] - 28;
+    state.ball.y = 50;
+    state.ball.z = PLAYER_Z[0] - 20;
+    state.ball.vy = 0;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 0, y: 60 };
+    // The live ball has no spin left at all...
+    state.ball.spinTop = 0;
+    state.seats[0]!.racket = { x: 0, y: 50 };
+    // ...but two ticks ago, where this player struck it, it was loaded.
     const trail = [
-      { ...state.ball, z: PLAYER_Z[0] - 18 },
-      { ...state.ball, z: PLAYER_Z[0] },
+      { ...state.ball, z: PLAYER_Z[0] - 20, spinTop: 0 },
+      { ...state.ball, z: PLAYER_Z[0], spinTop: MAX_SPIN },
     ];
     step(state, TICK, () => 0.5, trail);
-    expect(state.ball.vz).toBe(-SHOT_SPEED_Z);
+    expect(state.lastHitter).toBe(0);
+    // Reading the live ball would have carried nothing back.
+    expect(state.ball.spinTop).toBeCloseTo(-MAX_SPIN * SPIN_CARRY, 6);
   });
 
   it("keeps the ball alive past the plane while a lagged hit could connect", () => {
@@ -353,12 +723,20 @@ describe("racket hits", () => {
   });
 });
 
+/**
+ * How far past a racket plane a ball travelling at SHOT_SPEED_Z has to be
+ * before it is unambiguously dead. Beyond MISS_MARGIN a side still keeps the
+ * grace window its hit checks look back through, so a fixture that wants a
+ * dead ball has to clear both.
+ */
+const DEAD_PAST_PLANE = MISS_MARGIN + RENDER_LAG_TICKS * TICK * SHOT_SPEED_Z + 1;
+
 describe("scoring", () => {
   it("awards the hitting side when a bounced shot flies past the receivers", () => {
     const state = liveState();
     state.lastHitter = 0;
     state.bouncedSinceHit = true;
-    state.ball.z = PLAYER_Z[1] + MISS_MARGIN + 1;
+    state.ball.z = PLAYER_Z[1] + DEAD_PAST_PLANE;
     state.ball.y = 60;
     state.ball.vz = SHOT_SPEED_Z;
     step(state, TICK);
@@ -401,7 +779,7 @@ describe("scoring", () => {
     const state = liveState();
     state.lastHitter = 0;
     state.bouncedSinceHit = false;
-    state.ball.z = PLAYER_Z[1] + MISS_MARGIN + 1;
+    state.ball.z = PLAYER_Z[1] + DEAD_PAST_PLANE;
     state.ball.y = 60;
     state.ball.vz = SHOT_SPEED_Z;
     step(state, TICK);
@@ -413,7 +791,7 @@ describe("scoring", () => {
     state.scores = [WIN_SCORE - 1, 0];
     state.lastHitter = 0;
     state.bouncedSinceHit = true;
-    state.ball.z = PLAYER_Z[1] + MISS_MARGIN + 1;
+    state.ball.z = PLAYER_Z[1] + DEAD_PAST_PLANE;
     state.ball.y = 60;
     state.ball.vz = SHOT_SPEED_Z;
     step(state, TICK);
@@ -428,7 +806,7 @@ describe("scoring", () => {
     state.live = true;
     state.lastHitter = to;
     state.bouncedSinceHit = true;
-    state.ball.z = to === 0 ? PLAYER_Z[1] + MISS_MARGIN + 1 : PLAYER_Z[0] - MISS_MARGIN - 1;
+    state.ball.z = to === 0 ? PLAYER_Z[1] + DEAD_PAST_PLANE : PLAYER_Z[0] - DEAD_PAST_PLANE;
     state.ball.y = 60;
     state.ball.vy = 0;
     state.ball.vz = to === 0 ? SHOT_SPEED_Z : -SHOT_SPEED_Z;
