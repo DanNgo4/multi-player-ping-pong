@@ -28,6 +28,7 @@ import {
   RACKET_VEL_DECAY,
   RENDER_LAG_TICKS,
   SERVE_DELAY,
+  SERVE_HOLD_AHEAD,
   SHOT_LIFT,
   SHOT_SPEED_Z,
   SPIN_AIR_DECAY,
@@ -101,7 +102,8 @@ export function addSeat(state: GameState, side: PlayerIndex, id: string): Seat |
   const seat: Seat = {
     id,
     side,
-    racket: { x, y: HIT_HEIGHT },
+    // Starts at the back of the reach: the base plane the player stands on.
+    racket: { x, y: HIT_HEIGHT, z: PLAYER_Z[side] },
     vel: { x: 0, y: 0 },
     lagTicks: 0,
     ready: false,
@@ -275,13 +277,17 @@ export function step(
   }
 
   // Racket hits: any seat on the side the ball is heading toward may return
-  // it, probing the ball where that player's screen showed it.
+  // it, probing the ball where that player's screen showed it. The depth
+  // window travels with the racket, so a player who has reached forward over
+  // the table meets the ball there instead of back at their own plane; which
+  // way they may play it still comes from the plane they stand behind.
+  // Taking the ball out of the air before it has bounced on your own side is
+  // allowed on purpose: this is an arcade volley, not a let.
   for (const seat of state.seats) {
     const lag = Math.min(seatLookback(seat), ballTrail.length);
     const probe = lag > 0 ? (ballTrail[lag - 1] ?? ball) : ball;
-    const plane = PLAYER_Z[seat.side];
     const toward = seat.side === 0 ? probe.vz < 0 : probe.vz > 0;
-    if (!toward || Math.abs(probe.z - plane) > HIT_DEPTH) continue;
+    if (!toward || Math.abs(probe.z - seat.racket.z) > HIT_DEPTH) continue;
     const dx = probe.x - seat.racket.x;
     const dy = probe.y - seat.racket.y;
     // Elliptical hit region: full reach sideways and above the blade centre,
@@ -297,7 +303,9 @@ export function step(
     // so the spin it meets is the spin the probed snapshot carried too.
     ball.x = probe.x;
     ball.y = probe.y;
-    ball.z = plane + (seat.side === 0 ? 10 : -10);
+    // The return leaves from the blade, wherever the blade is: a shot taken
+    // early starts further down the table and so has less of it to cross.
+    ball.z = seat.racket.z + (seat.side === 0 ? 10 : -10);
     shoot(state, seat, dx, probe, rand);
     state.lastHitter = seat.side;
     state.bouncedSinceHit = false;
@@ -443,11 +451,6 @@ function shoot(
   // and came out quicker than a flat push, which is not a chop at all.
   const pace = backspinPace(spinTop);
   ball.vz = SHOT_SPEED_Z * dir * pace * (1 + swipe * POWER_BOOST * pace);
-  // Topspin shots launch flatter, backspin shots a touch higher. On top of that
-  // the incoming ball's own spin fights the blade: its topspin climbs off the
-  // face and carries long, its backspin drags the return down toward the net.
-  // A heavy ball therefore has to be answered with the swipe, not blocked.
-  ball.vy = SHOT_LIFT - spinTop * liftTilt(spinTop) + inTop * SPIN_RECEIVE_LIFT;
   // Side spin pushes the return on the way the incoming ball was curving, so
   // a hooking ball has to be aimed against.
   ball.vx =
@@ -476,6 +479,20 @@ function shoot(
     MAX_SPIN,
   );
   ball.spinTop = clamp(spinTop - inTop * SPIN_CARRY, -MAX_SPIN, MAX_SPIN);
+  // Topspin shots launch flatter, backspin shots a touch higher. On top of that
+  // the incoming ball's own spin fights the blade: its topspin climbs off the
+  // face and carries long, its backspin drags the return down toward the net.
+  // A heavy ball therefore has to be answered with the swipe, not blocked.
+  //
+  // The launch is then whatever still fits on the table from where the blade
+  // met the ball — see `landableLaunch`. Struck from the base plane at a
+  // normal height nothing is taken off it, so ordinary rallies play exactly as
+  // they did; it is the shots with no room left, taken from up the table or
+  // off a ball sitting high, that come down into a drive instead of a lob.
+  const baseLift = SHOT_LIFT - spinTop * liftTilt(spinTop) + inTop * SPIN_RECEIVE_LIFT;
+  const launch = landableLaunch(seat.side, ball, baseLift);
+  ball.vy = launch.vy;
+  ball.vz = launch.vz;
 }
 
 /**
@@ -529,9 +546,14 @@ function prepareServe(state: GameState, coast = false): void {
 function holdBall(state: GameState): void {
   const seat = servingSeat(state);
   state.coasting = false;
+  // The ball sits just in front of the blade, so it follows the server's
+  // racket wherever it goes — right up to the front of the reach. Serving from
+  // out there is playable rather than suicidal because `landableLift` flattens
+  // the serve to whatever length is left in front of it.
+  const dir = state.server === 0 ? 1 : -1;
   state.ball.x = seat ? seat.racket.x : 0;
   state.ball.y = HIT_HEIGHT;
-  state.ball.z = state.server === 0 ? 0 : TABLE_LENGTH;
+  state.ball.z = (seat ? seat.racket.z : PLAYER_Z[state.server]) + dir * SERVE_HOLD_AHEAD;
   state.ball.vx = 0;
   state.ball.vy = 0;
   state.ball.vz = 0;
@@ -543,28 +565,61 @@ function holdBall(state: GameState): void {
 const SERVE_SPIN_SCALES = [1, 0.7, 0.4, 0];
 
 /**
- * Simulates a serve's flight (same integration as `step`, at the server tick
- * rate) and reports whether it clears the net cleanly and first lands on the
- * receiving side of the table.
+ * Lift scales tried for a launch, longest first, until the ball comes down on
+ * the receiving side. The ladder runs well past flat and into a downward
+ * strike: a ball met high, or met from up the table with barely half the
+ * length left to play with, has to be hit *down* to stay on. See
+ * `landableLift`.
  */
-function serveIsLegal(
-  side: PlayerIndex,
+const SHOT_LIFT_SCALES = [
+  1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0, -0.2, -0.5, -0.9, -1.4, -2, -2.7,
+];
+
+/**
+ * Pace scales tried for a launch, and only after every lift has been tried at
+ * the one above. Giving up speed is the last thing a shot should do — arriving
+ * sooner is the whole reward for stepping in — but there are balls no lift can
+ * save: scraped off the table top and driven flat from up the table, a ball
+ * high enough to clear the tape is already long, and one short enough to land
+ * is already into the net. Those need the pace off, and nothing else will do.
+ */
+const SHOT_PACE_SCALES = [1, 0.85, 0.7, 0.55];
+
+/** Where a simulated flight first came down, and how it got past the net. */
+interface Landing {
+  /** False when the ball never reached a first bounce (netted, flew away). */
+  landed: boolean;
+  /** False when the tape blocked or clipped it on the way. */
+  clearedNet: boolean;
+  x: number;
+  z: number;
+}
+
+/**
+ * Simulates a launch (same integration as `step`, at the server tick rate) up
+ * to its first bounce. Both the serve legality check and the rally launch read
+ * this, so what the engine predicts about a shot is what the shot then does —
+ * the two integrations have to stay identical or a ball judged safe flies long.
+ */
+function simulateLaunch(
   x0: number,
+  y0: number,
+  z0: number,
   vx0: number,
   vy0: number,
   vz0: number,
   spinSide: number,
   spinTop: number,
-): boolean {
+): Landing {
   const dt = 1 / TICK_HZ;
   let x = x0;
-  let y = HIT_HEIGHT;
-  let z = side === 0 ? 0 : TABLE_LENGTH;
+  let y = y0;
+  let z = z0;
   let vx = vx0;
   let vy = vy0;
   const vz = vz0;
   // Spin fades in the air exactly as it does in `step`, so the flight this
-  // predicts is the flight the serve actually takes. Decay never flips a sign,
+  // predicts is the flight the ball actually takes. Decay never flips a sign,
   // so the float factor stays fixed for the whole simulation.
   let curSide = spinSide;
   let curTop = spinTop;
@@ -585,21 +640,95 @@ function serveIsLegal(
     if ((prevZ - NET_Z) * (z - NET_Z) < 0) {
       const t = (NET_Z - prevZ) / (z - prevZ);
       const heightAtNet = prevY + (y - prevY) * t;
-      // Must clear the tape cleanly — a cord clip or block is not a serve.
-      if (heightAtNet <= NET_HEIGHT + BALL_RADIUS) return false;
+      if (heightAtNet <= NET_HEIGHT + BALL_RADIUS) {
+        return { landed: false, clearedNet: false, x, z };
+      }
     }
-    if (vy < 0 && y <= BALL_RADIUS) {
-      const onReceivingSide = side === 0 ? z > NET_Z : z < NET_Z;
-      return (
-        onReceivingSide &&
-        z >= 0 &&
-        z <= TABLE_LENGTH &&
-        Math.abs(x) <= TABLE_WIDTH / 2
-      );
+    if (vy < 0 && y <= BALL_RADIUS) return { landed: true, clearedNet: true, x, z };
+    if (y < FLOOR_Y || z < PLAYER_Z[0] || z > PLAYER_Z[1]) {
+      return { landed: false, clearedNet: true, x, z };
     }
-    if (y < FLOOR_Y || z < PLAYER_Z[0] || z > PLAYER_Z[1]) return false;
   }
-  return false;
+  return { landed: false, clearedNet: true, x, z };
+}
+
+/** True when a simulated flight first came down on the far half of the table. */
+function landsOnReceivingSide(side: PlayerIndex, landing: Landing): boolean {
+  if (!landing.landed || !landing.clearedNet) return false;
+  const beyondNet = side === 0 ? landing.z > NET_Z : landing.z < NET_Z;
+  return beyondNet && landing.z >= 0 && landing.z <= TABLE_LENGTH;
+}
+
+/**
+ * The launch velocity for a shot that has to fit on the table.
+ *
+ * A racket can now meet the ball anywhere from its own baseline to well up its
+ * half, and it can meet it anywhere from the table surface to overhead — but
+ * SHOT_LIFT is a single number tuned for a full-length rally stroke. Struck
+ * with a third of the table already behind it, or off a ball sitting shoulder
+ * high, that same lift throws the ball past the far baseline every time; and
+ * since a shot that never bounced on the receiving side is scored as the
+ * *hitter's* fault, stepping in could only ever lose the point.
+ *
+ * So the lift is tried longest-first down SHOT_LIFT_SCALES, and only if none
+ * of them fits is any pace given up (SHOT_PACE_SCALES); the first pairing that
+ * comes down on the receiving side is taken. The ladder is walked against the
+ * same simulation `step` will actually run, spin and all, rather than a
+ * closed-form guess that would drift from it. Nothing is ever added: the ball
+ * never gets more lift or more speed than the stroke gave it, only less. A
+ * shot with the whole table in front of it is therefore untouched, and a shot
+ * with no room left turns into a drive and then a smash.
+ *
+ * A stroke that cannot be made to land at all is launched as struck. Taking
+ * the flattest rung instead would be far worse than doing nothing: a ball
+ * scraped off the table top at your own baseline cannot clear the tape cleanly
+ * at any lift, and answering that by driving it into the floor in front of you
+ * turns a ball that would have dribbled over the cord — a legal, playable shot
+ * — into a certain loss. Backspin dropping short is fine too; that is what a
+ * drop shot is.
+ */
+function landableLaunch(
+  side: PlayerIndex,
+  ball: Ball,
+  baseLift: number,
+): { vy: number; vz: number } {
+  for (const paceScale of SHOT_PACE_SCALES) {
+    const vz = ball.vz * paceScale;
+    for (const liftScale of SHOT_LIFT_SCALES) {
+      const vy = baseLift * liftScale;
+      const landing = simulateLaunch(
+        ball.x,
+        ball.y,
+        ball.z,
+        ball.vx,
+        vy,
+        vz,
+        ball.spinSide,
+        ball.spinTop,
+      );
+      if (landsOnReceivingSide(side, landing)) return { vy, vz };
+    }
+  }
+  return { vy: baseLift, vz: ball.vz };
+}
+
+/**
+ * Whether a serve clears the net cleanly and first lands in the receiving
+ * half, inside the sidelines.
+ */
+function serveIsLegal(
+  side: PlayerIndex,
+  x0: number,
+  z0: number,
+  vx0: number,
+  vy0: number,
+  vz0: number,
+  spinSide: number,
+  spinTop: number,
+): boolean {
+  // Wherever the server is holding the ball, including out over the table.
+  const landing = simulateLaunch(x0, HIT_HEIGHT, z0, vx0, vy0, vz0, spinSide, spinTop);
+  return landsOnReceivingSide(side, landing) && Math.abs(landing.x) <= TABLE_WIDTH / 2;
 }
 
 function launchServe(state: GameState, rand: Rand): void {
@@ -623,9 +752,20 @@ function launchServe(state: GameState, rand: Rand): void {
     // Same launch profile as a rally shot, minus the swipe's power boost: a
     // chopped serve leaves flat and slow, which is what lets it stay short
     // enough to be legal at full spin instead of being scaled away.
-    const vy = SHOT_LIFT - spinTop * liftTilt(spinTop);
-    const vz = SHOT_SPEED_Z * dir * backspinPace(spinTop);
-    if (scale !== 0 && !serveIsLegal(seat.side, ball.x, vx, vy, vz, spinSide, spinTop)) {
+    const struck = SHOT_SPEED_Z * dir * backspinPace(spinTop);
+    // ...and, exactly as a rally shot does, only as much of it as still fits
+    // on the table. That is what lets a player serve from anywhere in their
+    // reach: the spin ladder below cannot shorten a serve on its own, because
+    // its own last resort is a flat one.
+    const { vy, vz } = landableLaunch(
+      seat.side,
+      { ...ball, vx, vz: struck, spinSide, spinTop },
+      SHOT_LIFT - spinTop * liftTilt(spinTop),
+    );
+    if (
+      scale !== 0 &&
+      !serveIsLegal(seat.side, ball.x, ball.z, vx, vy, vz, spinSide, spinTop)
+    ) {
       continue;
     }
     ball.vx = vx;

@@ -11,7 +11,13 @@ export interface ChatEntry {
 }
 
 export type ClientMessage =
-  | { type: "racket"; x: number; y: number }
+  /**
+   * Racket position. `z` is how far the player has reached forward over their
+   * own end. It is optional on the wire because a client that predates the
+   * forward reach sends none: every reader has to cope with its absence, and
+   * the room reads a missing or non-finite z as the player's base plane.
+   */
+  | { type: "racket"; x: number; y: number; z?: number }
   | { type: "restart" }
   | { type: "chat"; text: string }
   /** A spectator asks to grab a free seat on a side; score is kept as-is. */
@@ -100,6 +106,9 @@ export type LobbyServerMessage = {
 export function parseClientMessage(raw: string): ClientMessage | null {
   try {
     const msg = JSON.parse(raw) as ClientMessage;
+    // z is deliberately not required here: what an absent or bad one falls
+    // back to is the sender's base plane, and only the room knows which side
+    // they sit on. It is validated in the room's racket handler instead.
     if (msg.type === "racket" && Number.isFinite(msg.x) && Number.isFinite(msg.y)) return msg;
     if (msg.type === "restart") return msg;
     if (msg.type === "chat" && typeof msg.text === "string") return msg;

@@ -7,8 +7,10 @@ import {
 import {
   MAX_LAG_TICKS,
   MAX_RACKET_SPEED,
+  PLAYER_Z,
   RACKET_MAX_X,
   RACKET_MAX_Y,
+  RACKET_REACH_Z,
   RENDER_LAG_TICKS,
   TICK_HZ,
 } from "../lib/game/constants";
@@ -108,6 +110,14 @@ export class MatchServer extends Server<Env> {
     const saved = (await this.store.get("session")) as SavedSession | undefined;
     if (!saved) return;
     this.state = saved.state;
+    // A session stored before rackets had any depth comes back without one,
+    // and an undefined z would sail straight through the engine's hit-depth
+    // test (every comparison against NaN is false) — turning that seat into a
+    // racket that reaches the whole table. Put those players on their base
+    // plane, which is where they were standing when the room went to sleep.
+    for (const seat of this.state.seats) {
+      if (!Number.isFinite(seat.racket.z)) seat.racket.z = PLAYER_Z[seat.side];
+    }
     this.playerNames = new Map(saved.playerNames);
     this.watcherNames = new Map(saved.watcherNames);
     this.creator = saved.creator;
@@ -190,9 +200,16 @@ export class MatchServer extends Server<Env> {
     // Game input is enforced by server-side role: spectators hold no seat.
     if (!seat) return;
     if (msg.type === "racket") {
+      // Forward reach runs from the player's own base plane toward the net and
+      // no further: side 0 reaches up the z axis, side 1 down it. A client too
+      // old to send z (or one sending nonsense) plays from its base plane.
+      const base = PLAYER_Z[seat.side];
+      const front = seat.side === 0 ? base + RACKET_REACH_Z : base - RACKET_REACH_Z;
+      const wantsZ = typeof msg.z === "number" && Number.isFinite(msg.z) ? msg.z : base;
       const next = {
         x: clamp(msg.x, -RACKET_MAX_X, RACKET_MAX_X),
         y: clamp(msg.y, 0, RACKET_MAX_Y),
+        z: clamp(wantsZ, Math.min(base, front), Math.max(base, front)),
       };
       const now = Date.now();
       const prev = this.lastRacketInput.get(conn.id);
@@ -204,7 +221,8 @@ export class MatchServer extends Server<Env> {
           y: clamp((next.y - prev.y) / dt, -MAX_RACKET_SPEED, MAX_RACKET_SPEED),
         };
       }
-      this.lastRacketInput.set(conn.id, { ...next, t: now });
+      // Only the in-plane axes feed racket velocity, so only they are tracked.
+      this.lastRacketInput.set(conn.id, { x: next.x, y: next.y, t: now });
       seat.racket = next;
     } else if (msg.type === "ready" && this.state.status === "waiting") {
       seat.ready = !seat.ready;

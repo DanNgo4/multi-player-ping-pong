@@ -21,8 +21,32 @@ export const FLOOR_Y = -80;
 
 /** z of each player's racket plane, just off the table ends. */
 export const PLAYER_Z: readonly [number, number] = [-30, TABLE_LENGTH + 30];
+/**
+ * How far forward over the table a racket may reach from its base plane, so a
+ * player can step in and take the ball early instead of only ever meeting it
+ * at their own end.
+ *
+ * From a base plane of ∓30 this puts the front of the reach at z=150 (and its
+ * mirror at 390) — just over a quarter of the way down the player's own half,
+ * and a clear 120 short of the net at NET_Z=270. Staying well behind the net
+ * matters: reach that met at the tape would let both sides contest the same
+ * ball in the same tick, and the hit loop resolves seats in seat order, not by
+ * who got there first.
+ */
+export const RACKET_REACH_Z = 180;
 /** How far past a racket plane the ball may fly before the point is dead. */
 export const MISS_MARGIN = 60;
+/**
+ * How far in front of the blade a waiting serve is held. The ball has always
+ * been served from the near edge of the table, which is exactly this far ahead
+ * of a racket sitting on its base plane — and the whole serve profile
+ * (SHOT_LIFT, the spin tilts, the legality pre-simulation) is tuned around
+ * that starting point, closely enough that surrendering the 30 units turns a
+ * heavy topspin serve into one that lands short of the net and gets scaled
+ * flat. Keeping the offset lets the held ball follow a racket that has reached
+ * forward without re-tuning every serve in the game.
+ */
+export const SERVE_HOLD_AHEAD = 30;
 
 /** Depth window around the racket plane in which a hit can connect. */
 export const HIT_DEPTH = 40;

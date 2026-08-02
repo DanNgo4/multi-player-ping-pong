@@ -21,8 +21,23 @@ export interface Ball {
   spinTop: number;
 }
 
-/** Racket position in its player's hit plane; driven directly by mouse input. */
+/**
+ * Racket position, driven directly by pointer input. x is lateral and y is
+ * height, as they always were; z is how far the player has reached forward
+ * over their own end of the table, between their base plane (PLAYER_Z) and
+ * RACKET_REACH_Z in front of it.
+ */
 export interface Racket {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Racket velocity in the hit plane. Only lateral and vertical motion brushes
+ * spin onto the ball, so reaching forward has no z term to track here.
+ */
+export interface RacketVelocity {
   x: number;
   y: number;
 }
@@ -34,7 +49,7 @@ export interface Seat {
   side: PlayerIndex;
   racket: Racket;
   /** Racket velocity (units/s), tracked server-side from input deltas; feeds spin. */
-  vel: Racket;
+  vel: RacketVelocity;
   /**
    * Lag compensation: how many ticks into the past this player's hit checks
    * look, matching what their screen showed when they reacted. Set from their

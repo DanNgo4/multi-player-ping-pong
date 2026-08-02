@@ -3,17 +3,22 @@ import {
   BALL_RADIUS,
   COUNTDOWN_SECONDS,
   FLOOR_Y,
+  HIT_DEPTH,
   HIT_HEIGHT,
   HOLD_BALL_WINDOW,
+  MAX_RACKET_SPEED,
   MAX_SPIN,
   MISS_MARGIN,
   NET_HEIGHT,
   NET_Z,
   PLAYER_Z,
   POWER_BOOST,
+  RACKET_MAX_Y,
+  RACKET_REACH_Z,
   RACKET_VEL_DECAY,
   RENDER_LAG_TICKS,
   SERVE_DELAY,
+  SERVE_HOLD_AHEAD,
   SHOT_SPEED_Z,
   SPIN_AIR_DECAY,
   SPIN_CARRY,
@@ -230,7 +235,51 @@ describe("countdown and serve", () => {
     state.seats[0]!.racket.x = 55;
     step(state, TICK);
     expect(state.ball.x).toBe(55);
-    expect(state.ball.z).toBe(0);
+    expect(state.ball.z).toBe(PLAYER_Z[0] + SERVE_HOLD_AHEAD);
+  });
+
+  it("keeps the held ball on the blade right through the reach", () => {
+    // The ball rides just in front of the racket wherever it goes: nothing is
+    // capped, so the blade never overshoots and passes through its own serve.
+    for (const side of [0, 1] as const) {
+      const dir = side === 0 ? 1 : -1;
+      for (const advance of [0, RACKET_REACH_Z / 2, RACKET_REACH_Z]) {
+        const state = seatedState();
+        state.status = "playing";
+        state.live = false;
+        state.server = side;
+        state.serveTimer = 10;
+        state.seats[side]!.racket.z = PLAYER_Z[side] + dir * advance;
+        step(state, TICK);
+        expect(state.ball.z).toBe(PLAYER_Z[side] + dir * (advance + SERVE_HOLD_AHEAD));
+      }
+    }
+  });
+
+  it("lands every serve on the table from anywhere in the reach", () => {
+    // The same sweep as the guard above, now run from every depth the server
+    // can stand at: the pre-simulation has to start the flight from where the
+    // ball is actually held, and the launch has to give up whatever lift no
+    // longer fits in front of it. Nothing else downstream can shorten a serve
+    // — the spin ladder's last resort is a flat serve — so this is what keeps
+    // a stepped-in server from gifting the point away.
+    for (const advance of [0, RACKET_REACH_Z / 2, RACKET_REACH_Z]) {
+      for (const x of [-900, 0, 900]) {
+        for (const y of [-900, -450, 0, 450, 900]) {
+          const state = seatedState();
+          state.status = "playing";
+          state.live = false;
+          state.serveTimer = 0.01;
+          state.seats[0]!.racket.z = PLAYER_Z[0] + advance;
+          state.seats[0]!.vel = { x, y };
+          // The receiver must not intercept: this is about the serve alone.
+          state.seats[1]!.racket = { x: 9999, y: 9999, z: PLAYER_Z[1] };
+          step(state, TICK);
+          expect(state.live).toBe(true);
+          expect(serveLandsIn(state)).toBe(true);
+        }
+      }
+    }
   });
 });
 
@@ -295,6 +344,179 @@ describe("flight", () => {
   });
 });
 
+describe("forward reach", () => {
+  /** A ball dropping in well short of side 0's base plane, still travelling. */
+  const shortBall = (advance: number): GameState => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.ball.x = 0;
+    state.ball.y = 50;
+    state.ball.z = PLAYER_Z[0] + advance;
+    state.ball.vz = -SHOT_SPEED_Z;
+    return state;
+  };
+
+  it("seats a new player at their own base plane", () => {
+    const state = createInitialState();
+    expect(addSeat(state, 0, "a")?.racket.z).toBe(PLAYER_Z[0]);
+    expect(addSeat(state, 1, "b")?.racket.z).toBe(PLAYER_Z[1]);
+  });
+
+  it("takes the ball early when the player has reached forward", () => {
+    const advance = 120;
+    const state = shortBall(advance);
+    state.seats[0]!.racket = { x: 0, y: 55, z: PLAYER_Z[0] + advance };
+    step(state, TICK);
+    expect(state.lastHitter).toBe(0);
+    expect(state.ball.vz).toBeGreaterThan(0);
+    // The return leaves from the blade, not from the base plane behind it.
+    expect(state.ball.z).toBeCloseTo(PLAYER_Z[0] + advance + 10, 6);
+  });
+
+  it("leaves that same ball alone for a player standing at their plane", () => {
+    const state = shortBall(120);
+    state.seats[0]!.racket = { x: 0, y: 55, z: PLAYER_Z[0] };
+    step(state, TICK);
+    expect(state.lastHitter).toBe(1);
+    expect(state.ball.vz).toBeLessThan(0);
+  });
+
+  it("mirrors the reach for side 1", () => {
+    const advance = 120;
+    const state = liveState();
+    state.lastHitter = 0;
+    state.ball.x = 0;
+    state.ball.y = 50;
+    state.ball.z = PLAYER_Z[1] - advance;
+    state.ball.vz = SHOT_SPEED_Z;
+    state.seats[1]!.racket = { x: 0, y: 55, z: PLAYER_Z[1] - advance };
+    step(state, TICK);
+    expect(state.lastHitter).toBe(1);
+    expect(state.ball.vz).toBeLessThan(0);
+    expect(state.ball.z).toBeCloseTo(PLAYER_Z[1] - advance - 10, 6);
+  });
+
+  it("never lets a reached-out racket hit a ball on its way out", () => {
+    // Direction still comes from the side the player stands behind, not from
+    // where the blade is: a ball leaving side 0 must not be caught by side 0's
+    // own racket sitting further up the table.
+    const state = liveState();
+    state.lastHitter = 0;
+    state.ball.x = 0;
+    state.ball.y = 50;
+    state.ball.z = PLAYER_Z[0] + 120;
+    state.ball.vz = SHOT_SPEED_Z;
+    state.seats[0]!.racket = { x: 0, y: 55, z: PLAYER_Z[0] + 120 };
+    step(state, TICK);
+    expect(state.lastHitter).toBe(0);
+    expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+  });
+
+  /**
+   * Side 0 returns a ball met at `contactY`, `advance` up the table, with the
+   * given swipe on the blade, and reports where that return first came down.
+   */
+  const rallyLanding = (
+    advance: number,
+    contactY: number,
+    velX: number,
+    velY: number,
+  ): { landedZ: number; lost: boolean } => {
+    const state = liveState();
+    state.lastHitter = 1;
+    state.bouncedSinceHit = true;
+    state.ball.x = 0;
+    state.ball.y = contactY;
+    state.ball.z = PLAYER_Z[0] + advance;
+    state.ball.vz = -SHOT_SPEED_Z;
+    state.seats[0]!.racket = { x: 0, y: contactY, z: PLAYER_Z[0] + advance };
+    state.seats[0]!.vel = { x: velX, y: velY };
+    // The opponent must not intercept: this is about where the return lands.
+    state.seats[1]!.racket = { x: 9999, y: 9999, z: PLAYER_Z[1] };
+    step(state, TICK, () => 0.5);
+    expect(state.lastHitter).toBe(0);
+    for (let t = 0; t < 3; t += TICK) {
+      const prev = { ...state.ball };
+      step(state, TICK, () => 0.5);
+      // First bounce: the tick the ball stops falling and starts rising.
+      if (prev.vy < 0 && state.ball.vy > 0) {
+        return { landedZ: state.ball.z, lost: state.scores[1] !== 0 };
+      }
+      if (state.scores[0] !== 0 || state.scores[1] !== 0) {
+        return { landedZ: prev.z, lost: state.scores[1] !== 0 };
+      }
+    }
+    return { landedZ: state.ball.z, lost: false };
+  };
+
+  const ADVANCES = [0, 45, 90, 135, RACKET_REACH_Z];
+  const CONTACT_HEIGHTS = [10, 60, 120, 180, RACKET_MAX_Y];
+  const SWIPES: readonly (readonly [number, number])[] = [
+    [0, 0],
+    [0, MAX_RACKET_SPEED],
+    [0, -MAX_RACKET_SPEED],
+    [MAX_RACKET_SPEED, 0],
+    [MAX_RACKET_SPEED, MAX_RACKET_SPEED],
+  ];
+
+  it("never drives a return past the far baseline, from any depth or height", () => {
+    // The bug this guards: SHOT_SPEED_Z and SHOT_LIFT are tuned for a stroke
+    // played from the baseline, and a ball struck with a third of the table
+    // already behind it carried that same distance straight off the end. A
+    // shot that never bounced on the receiving side is scored as the hitter's
+    // fault, so without this, stepping in could only ever lose the point.
+    for (const advance of ADVANCES) {
+      for (const contactY of CONTACT_HEIGHTS) {
+        for (const [vx, vy] of SWIPES) {
+          const { landedZ } = rallyLanding(advance, contactY, vx, vy);
+          expect(landedZ).toBeLessThanOrEqual(TABLE_LENGTH);
+        }
+      }
+    }
+  });
+
+  it("lands a flat or driven return on the receiving side from anywhere", () => {
+    for (const advance of ADVANCES) {
+      for (const contactY of CONTACT_HEIGHTS) {
+        for (const [vx, vy] of [[0, 0], [MAX_RACKET_SPEED, 0]] as const) {
+          const { landedZ, lost } = rallyLanding(advance, contactY, vx, vy);
+          expect(landedZ).toBeGreaterThan(NET_Z);
+          expect(landedZ).toBeLessThanOrEqual(TABLE_LENGTH);
+          expect(lost).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("never makes a stroke worse for having stepped in", () => {
+    // Some strokes cannot be saved by any launch — a heavy loop off a ball
+    // scraped from the table top nets whatever you do with it — but that is
+    // the physics of the stroke, not of the reach. Whatever lands from the
+    // baseline has to land from every depth in front of it too.
+    for (const contactY of CONTACT_HEIGHTS) {
+      for (const [vx, vy] of SWIPES) {
+        const atBase = rallyLanding(0, contactY, vx, vy);
+        if (atBase.landedZ <= NET_Z || atBase.lost) continue;
+        for (const advance of ADVANCES) {
+          const stepped = rallyLanding(advance, contactY, vx, vy);
+          expect(stepped.landedZ).toBeGreaterThan(NET_Z);
+          expect(stepped.landedZ).toBeLessThanOrEqual(TABLE_LENGTH);
+          expect(stepped.lost).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("keeps the whole reach on the player's own half, clear of the net", () => {
+    for (const side of [0, 1] as const) {
+      const dir = side === 0 ? 1 : -1;
+      const front = PLAYER_Z[side] + dir * RACKET_REACH_Z;
+      expect(Math.abs(front - NET_Z)).toBeGreaterThan(HIT_DEPTH * 2);
+      expect(dir * (NET_Z - front)).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe("racket hits", () => {
   it("returns the ball when the racket covers it", () => {
     const state = liveState();
@@ -303,7 +525,7 @@ describe("racket hits", () => {
     state.ball.y = 50;
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 25, y: 55 };
+    state.seats[0]!.racket = { x: 25, y: 55, z: PLAYER_Z[0] };
     step(state, TICK);
     expect(state.ball.vz).toBe(SHOT_SPEED_Z);
     expect(state.lastHitter).toBe(0);
@@ -317,7 +539,7 @@ describe("racket hits", () => {
     state.ball.y = 50;
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 150, y: 55 };
+    state.seats[0]!.racket = { x: 150, y: 55, z: PLAYER_Z[0] };
     step(state, TICK);
     expect(state.ball.vz).toBe(-SHOT_SPEED_Z);
   });
@@ -330,7 +552,7 @@ describe("racket hits", () => {
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
     // Blade centre ~50 above the ball: only the handle overlaps it.
-    state.seats[0]!.racket = { x: 0, y: 100 };
+    state.seats[0]!.racket = { x: 0, y: 100, z: PLAYER_Z[0] };
     step(state, TICK);
     expect(state.ball.vz).toBe(-SHOT_SPEED_Z);
   });
@@ -342,7 +564,7 @@ describe("racket hits", () => {
     state.ball.y = 90;
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 0, y: 40 };
+    state.seats[0]!.racket = { x: 0, y: 40, z: PLAYER_Z[0] };
     step(state, TICK);
     expect(state.ball.vz).toBe(SHOT_SPEED_Z);
   });
@@ -364,7 +586,7 @@ describe("racket hits", () => {
       state.ball.vz = -SHOT_SPEED_Z;
       state.ball.x = 200;
       state.ball.z = PLAYER_Z[0] - 8;
-      state.seats[0]!.racket = { x: racketX, y: 50 };
+      state.seats[0]!.racket = { x: racketX, y: 50, z: PLAYER_Z[0] };
       // Newest first, 30 units of x and 18 of z per tick. The server ends this
       // tick with the ball at x=230; two ticks back — what the client drew —
       // it was at x=170, a clear 60 wide of that.
@@ -400,7 +622,7 @@ describe("racket hits", () => {
     state.ball.y = 60;
     state.ball.z = PLAYER_Z[0] - 28;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 0, y: 60 };
+    state.seats[0]!.racket = { x: 0, y: 60, z: PLAYER_Z[0] };
     state.seats[0]!.lagTicks = 2;
     // ...but two ticks ago it was right on the racket.
     const past = { ...state.ball, z: PLAYER_Z[0] };
@@ -422,7 +644,7 @@ describe("racket hits", () => {
       state.ball.z = PLAYER_Z[0] + 10;
       state.ball.vx = 600;
       state.ball.vz = -SHOT_SPEED_Z;
-      state.seats[0]!.racket = { x: 0, y: 60 };
+      state.seats[0]!.racket = { x: 0, y: 60, z: PLAYER_Z[0] };
       state.seats[0]!.lagTicks = lagTicks;
       const trail = [1, 2, 3, 4].map((k) => ({
         ...state.ball,
@@ -454,7 +676,7 @@ describe("racket hits", () => {
       state.ball.vz = -SHOT_SPEED_Z;
       state.ball.spinSide = spinSide;
       state.ball.spinTop = spinTop;
-      state.seats[0]!.racket = { x: 0, y: 50 };
+      state.seats[0]!.racket = { x: 0, y: 50, z: PLAYER_Z[0] };
       state.seats[0]!.vel = { ...vel };
       step(state, TICK, () => 0.5);
       expect(state.lastHitter).toBe(0);
@@ -490,7 +712,7 @@ describe("racket hits", () => {
         state.ball.vy = 0;
         state.ball.vz = SHOT_SPEED_Z;
         state.ball.spinSide = spinSide;
-        state.seats[1]!.racket = { x: 0, y: 50 };
+        state.seats[1]!.racket = { x: 0, y: 50, z: PLAYER_Z[1] };
         step(state, TICK, () => 0.5);
         expect(state.lastHitter).toBe(1);
         return state.ball.vx;
@@ -540,7 +762,7 @@ describe("racket hits", () => {
       state.ball.vz = -SHOT_SPEED_Z;
       // Heading toward side 0, this spin drags the ball toward -x.
       state.ball.spinSide = MAX_SPIN;
-      state.seats[0]!.racket = { x: 0, y: 50 };
+      state.seats[0]!.racket = { x: 0, y: 50, z: PLAYER_Z[0] };
       step(state, TICK, () => 0.5);
       expect(state.lastHitter).toBe(0);
       expect(state.ball.spinSide).toBeGreaterThan(0);
@@ -567,7 +789,7 @@ describe("racket hits", () => {
         state.ball.vz = -SHOT_SPEED_Z;
         state.ball.spinSide = spinSide!;
         state.ball.spinTop = spinTop!;
-        state.seats[0]!.racket = { x: 0, y: 50 };
+        state.seats[0]!.racket = { x: 0, y: 50, z: PLAYER_Z[0] };
         step(state, TICK, () => 0.5);
         expect(state.lastHitter).toBe(0);
         // The return must land on the far half rather than fly out or net.
@@ -618,7 +840,7 @@ describe("racket hits", () => {
       state.ball.vz = -SHOT_SPEED_Z;
       state.ball.spinTop = MAX_SPIN;
       // Out of reach until it arrives.
-      state.seats[0]!.racket = { x: 9999, y: 0 };
+      state.seats[0]!.racket = { x: 9999, y: 0, z: PLAYER_Z[0] };
       let ticks = 0;
       while (state.ball.z > PLAYER_Z[0] + 20 && ticks < 120) {
         step(state, TICK, () => 0.5);
@@ -628,7 +850,7 @@ describe("racket hits", () => {
       expect(state.bouncedSinceHit).toBe(false);
       expect(spinOnArrival).toBeLessThan(MAX_SPIN * 0.65);
       // Put the bat on it and return it.
-      state.seats[0]!.racket = { x: state.ball.x, y: state.ball.y };
+      state.seats[0]!.racket = { x: state.ball.x, y: state.ball.y, z: PLAYER_Z[0] };
       step(state, TICK, () => 0.5);
       expect(state.lastHitter).toBe(0);
       // Less spin left means less of a kick off the blade than a fresh ball.
@@ -667,7 +889,7 @@ describe("racket hits", () => {
     state.ball.y = 50;
     state.ball.vy = 0;
     state.ball.vz = -fast;
-    state.seats[0]!.racket = { x: 0, y: 50 };
+    state.seats[0]!.racket = { x: 0, y: 50, z: PLAYER_Z[0] };
     const seen = (x: number, z: number) => ({ ...state.ball, x, y: 50, z });
 
     // Tick one: already past MISS_MARGIN, and this tick's probe is wide of the
@@ -701,7 +923,7 @@ describe("racket hits", () => {
     state.ball.vz = -SHOT_SPEED_Z;
     // The live ball has no spin left at all...
     state.ball.spinTop = 0;
-    state.seats[0]!.racket = { x: 0, y: 50 };
+    state.seats[0]!.racket = { x: 0, y: 50, z: PLAYER_Z[0] };
     // ...but two ticks ago, where this player struck it, it was loaded.
     const trail = [
       { ...state.ball, z: PLAYER_Z[0] - 20, spinTop: 0 },
@@ -736,9 +958,9 @@ describe("racket hits", () => {
     state.ball.y = 50;
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: -150, y: 55 };
+    state.seats[0]!.racket = { x: -150, y: 55, z: PLAYER_Z[0] };
     const teammate = state.seats.find((s) => s.id === "a2")!;
-    teammate.racket = { x: 85, y: 55 };
+    teammate.racket = { x: 85, y: 55, z: PLAYER_Z[0] };
     step(state, TICK);
     expect(state.ball.vz).toBe(SHOT_SPEED_Z);
     expect(state.lastHitter).toBe(0);
@@ -925,7 +1147,7 @@ describe("dead ball flight", () => {
     step(state, TICK);
     expect(state.coasting).toBe(false);
     expect(state.ball.x).toBe(62);
-    expect(state.ball.z).toBe(TABLE_LENGTH);
+    expect(state.ball.z).toBe(PLAYER_Z[1] - SERVE_HOLD_AHEAD);
     expect(state.ball.vz).toBe(0);
     expect(state.ball.spinTop).toBe(0);
   });
@@ -1014,7 +1236,7 @@ describe("dead ball flight", () => {
     suspendPlay(state);
     expect(state.coasting).toBe(false);
     expect(state.ball.y).toBe(HIT_HEIGHT);
-    expect(state.ball.z).toBe(TABLE_LENGTH);
+    expect(state.ball.z).toBe(PLAYER_Z[1] - SERVE_HOLD_AHEAD);
     expect(state.ball.vz).toBe(0);
   });
 
@@ -1042,7 +1264,7 @@ describe("spin", () => {
     state.ball.y = 50;
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 25, y: 55 };
+    state.seats[0]!.racket = { x: 25, y: 55, z: PLAYER_Z[0] };
     state.seats[0]!.vel = { x: 400, y: 300 };
     step(state, TICK);
     expect(state.lastHitter).toBe(0);
@@ -1095,7 +1317,7 @@ describe("spin", () => {
     state.ball.y = 50;
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 25, y: 55 };
+    state.seats[0]!.racket = { x: 25, y: 55, z: PLAYER_Z[0] };
     state.seats[0]!.vel = { x: 0, y: 900 };
     step(state, TICK);
     expect(state.lastHitter).toBe(0);
@@ -1110,7 +1332,7 @@ describe("spin", () => {
       state.ball.y = 50;
       state.ball.z = PLAYER_Z[0] + 20;
       state.ball.vz = -SHOT_SPEED_Z;
-      state.seats[0]!.racket = { x: 25, y: 55 };
+      state.seats[0]!.racket = { x: 25, y: 55, z: PLAYER_Z[0] };
       state.seats[0]!.vel = { x: 0, y: velY };
       step(state, TICK);
       return state.ball.vy;
@@ -1127,7 +1349,7 @@ describe("spin", () => {
       state.ball.y = 50;
       state.ball.z = PLAYER_Z[0] + 20;
       state.ball.vz = -SHOT_SPEED_Z;
-      state.seats[0]!.racket = { x: 25, y: 55 };
+      state.seats[0]!.racket = { x: 25, y: 55, z: PLAYER_Z[0] };
       state.seats[0]!.vel = { x: 0, y: velY };
       step(state, TICK);
       return state.ball.vz;
@@ -1150,7 +1372,7 @@ describe("spin", () => {
       state.ball.y = 50;
       state.ball.z = PLAYER_Z[0] + 20;
       state.ball.vz = -SHOT_SPEED_Z;
-      state.seats[0]!.racket = { x: 25, y: 55 };
+      state.seats[0]!.racket = { x: 25, y: 55, z: PLAYER_Z[0] };
       state.seats[0]!.vel = { x: velX, y: velY };
       step(state, TICK);
       return state.ball.vz;
@@ -1204,10 +1426,10 @@ describe("spin", () => {
       state.ball.y = contactY;
       state.ball.z = PLAYER_Z[0] + 20;
       state.ball.vz = -SHOT_SPEED_Z;
-      state.seats[0]!.racket = { x: 0, y: contactY };
+      state.seats[0]!.racket = { x: 0, y: contactY, z: PLAYER_Z[0] };
       state.seats[0]!.vel = { x: velX, y: velY };
       // Park the receiver out of reach so only the flight is under test.
-      state.seats[1]!.racket = { x: 900, y: 900 };
+      state.seats[1]!.racket = { x: 900, y: 900, z: PLAYER_Z[1] };
       step(state, TICK);
       if (velY < 0) expect(state.ball.spinTop).toBeLessThan(0);
       let carryZ = NaN;
@@ -1304,7 +1526,7 @@ describe("shot viability", () => {
     state.ball.y = 60;
     state.ball.z = PLAYER_Z[0] + 20;
     state.ball.vz = -SHOT_SPEED_Z;
-    state.seats[0]!.racket = { x: 0, y: 60 };
+    state.seats[0]!.racket = { x: 0, y: 60, z: PLAYER_Z[0] };
     state.seats[0]!.vel = { x: 0, y: 600 };
     for (let t = 0; t < 2 && !state.bouncedSinceHit && state.scores[1] === 0; t += TICK) {
       step(state, TICK, () => 0.5);

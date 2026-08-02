@@ -11,8 +11,8 @@ import {
   NET_Z,
   PLAYER_Z,
   RACKET_MAX_X,
-  RACKET_MAX_Y,
   RACKET_RADIUS,
+  RACKET_REACH_Z,
   TABLE_LENGTH,
   TABLE_WIDTH,
 } from "@/lib/game/constants";
@@ -198,26 +198,89 @@ interface Projected {
   scale: number;
 }
 
+/** Camera depth of a world z, seen from the viewer's own end. */
+function toViewZ(z: number, flip: boolean): number {
+  return flip ? TABLE_LENGTH - z : z;
+}
+
+function scaleAt(viewZ: number): number {
+  return (FOV / (FOV + CAM_BACK + viewZ)) * PIXELS;
+}
+
 function project(x: number, y: number, z: number, flip: boolean): Projected {
-  const viewZ = flip ? TABLE_LENGTH - z : z;
+  const viewZ = toViewZ(z, flip);
   const viewX = flip ? -x : x;
-  const scale = (FOV / (FOV + CAM_BACK + viewZ)) * PIXELS;
+  const scale = scaleAt(viewZ);
   return { x: CX + viewX * scale, y: CY + (CAM_HEIGHT - y) * scale, scale };
 }
 
-/** Inverse of project() in the viewer's own racket plane, for mouse input. */
-function unprojectOwnPlane(px: number, py: number, side: PlayerIndex): Racket {
-  const planeZ = PLAYER_Z[side];
+/**
+ * Racket height at which the player starts stepping in. Below it the racket
+ * stays on the base plane and plays the classic game — which is most of the
+ * canvas, and covers a ball arriving as high as RAMP_Y + HIT_RADIUS.
+ */
+const RAMP_Y = 160;
+/** Height the racket has drifted up to at the front of the reach: smash level. */
+const SMASH_Y = 205;
+
+/**
+ * Inverse of project() onto the player's control surface, for pointer input.
+ *
+ * The surface is a continuous sheet standing in front of the player, in two
+ * panels the pointer walks up in order:
+ *
+ *   1. the vertical plane at the player's base z — the surface this game has
+ *      always had — from the table surface up to RAMP_Y. Ordinary rallies,
+ *      spin swipes and high balls at your own baseline all live here;
+ *   2. above it, a straight ramp running from (baseZ, RAMP_Y) up to
+ *      (frontZ, SMASH_Y): pushing the pointer further up the screen carries
+ *      the racket out over the table, drifting up to smash height as it goes.
+ *
+ * The panels share the edge at (baseZ, RAMP_Y), so the mapping is continuous
+ * by construction — both return the same world point there and the paddle
+ * never jumps. The seam is that shared edge and not the projected near edge of
+ * the table: in this projection screen y depends only on world y and depth, so
+ * the table edge draws well *below* where the racket sits at hitting height,
+ * and seaming there would have left panel 1 covering ~10 units of racket
+ * height with the whole rest of the canvas out over the table.
+ */
+function unprojectControl(px: number, py: number, side: PlayerIndex): Racket {
   const flip = side === 1;
-  const viewZ = flip ? TABLE_LENGTH - planeZ : planeZ;
-  const scale = (FOV / (FOV + CAM_BACK + viewZ)) * PIXELS;
-  const viewX = (px - CX) / scale;
+  const baseZ = PLAYER_Z[side];
+  // Reaching forward means toward the net, whichever end the player is at.
+  const frontZ = side === 0 ? baseZ + RACKET_REACH_Z : baseZ - RACKET_REACH_Z;
+  const baseScale = scaleAt(toViewZ(baseZ, flip));
+  // Screen row of the seam, and of the far end of the ramp above it.
+  const seamY = CY + (CAM_HEIGHT - RAMP_Y) * baseScale;
+  const frontY = CY + (CAM_HEIGHT - SMASH_Y) * scaleAt(toViewZ(frontZ, flip));
+
+  let z: number;
+  let y: number;
+  if (py >= seamY) {
+    z = baseZ;
+    y = clamp(CAM_HEIGHT - (py - CY) / baseScale, 0, RAMP_Y);
+  } else {
+    // How far up the ramp the pointer has climbed. The ramp is a straight
+    // segment in (z, y), so one parameter drives both.
+    const t = clamp((seamY - py) / (seamY - frontY), 0, 1);
+    z = lerp(baseZ, frontZ, t);
+    y = lerp(RAMP_Y, SMASH_Y, t);
+  }
+  // Lateral aim reads off one fixed scale — the base plane's — on both panels,
+  // never the scale at the racket's current depth. Tying it to depth would
+  // mean a straight vertical flick moved the racket sideways in world terms as
+  // the perspective scale changed under it, which the server reads as racket
+  // velocity: a purely up-and-down swipe came out as heavy side spin and a
+  // full power boost. The cost is that a racket out over the table draws a
+  // little inside of the pointer's own column; aim stays honest, which is what
+  // the ball responds to.
+  const viewX = (px - CX) / baseScale;
   const x = flip ? -viewX : viewX;
-  const y = CAM_HEIGHT - (py - CY) / scale;
-  return {
-    x: Math.min(Math.max(x, -RACKET_MAX_X), RACKET_MAX_X),
-    y: Math.min(Math.max(y, 0), RACKET_MAX_Y),
-  };
+  return { x: clamp(x, -RACKET_MAX_X, RACKET_MAX_X), y, z };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 function lerp(a: number, b: number, t: number): number {
@@ -280,6 +343,14 @@ function interpolate(prev: Snapshot | null, cur: Snapshot, now: number): GameSta
         racket: {
           x: lerp(before.racket.x, seat.racket.x, t),
           y: lerp(before.racket.y, seat.racket.y, t),
+          // A room server too old to know about depth sends seats without a z.
+          // Lerping undefined yields NaN, and a racket projected from NaN is
+          // never drawn at all — so fall back to the plane they must be on.
+          z: lerp(
+            before.racket.z ?? PLAYER_Z[before.side],
+            seat.racket.z ?? PLAYER_Z[seat.side],
+            t,
+          ),
         },
       };
     }),
@@ -317,7 +388,7 @@ export default function GameClient({ room, intent }: Props) {
   const prevSnapRef = useRef<Snapshot | null>(null);
   const curSnapRef = useRef<Snapshot>({ state: createInitialState(), at: 0 });
   const namesRef = useRef<SeatNames>([]);
-  const racketRef = useRef<Racket>({ x: 0, y: HIT_HEIGHT });
+  const racketRef = useRef<Racket>({ x: 0, y: HIT_HEIGHT, z: PLAYER_Z[0] });
   const roleRef = useRef<Role | null>(null);
   const seatIdRef = useRef<string | null>(null);
   const sideRef = useRef<PlayerIndex | null>(null);
@@ -357,7 +428,17 @@ export default function GameClient({ room, intent }: Props) {
         // Start the local racket where the server seated us (duo seats are
         // offset sideways) so teammates don't stack until the first input.
         const ownSeat = msg.state.seats.find((s) => s.id === msg.seatId);
-        if (ownSeat) racketRef.current = { ...ownSeat.racket };
+        // Depth has to come from the side we were actually given: a side-1
+        // player starting from side 0's plane would be clamped by the server
+        // to the far end of their reach while drawing at the near one.
+        if (ownSeat) {
+          racketRef.current = {
+            ...ownSeat.racket,
+            z: ownSeat.racket.z ?? PLAYER_Z[ownSeat.side],
+          };
+        } else if (msg.side !== null) {
+          racketRef.current = { ...racketRef.current, z: PLAYER_Z[msg.side] };
+        }
         prevSnapRef.current = null;
         curSnapRef.current = stamp(msg.state);
         namesRef.current = msg.names;
@@ -454,7 +535,7 @@ export default function GameClient({ room, intent }: Props) {
       const rect = canvas.getBoundingClientRect();
       const px = ((e.clientX - rect.left) / rect.width) * CANVAS_W;
       const py = ((e.clientY - rect.top) / rect.height) * CANVAS_H;
-      racketRef.current = unprojectOwnPlane(px, py, side);
+      racketRef.current = unprojectControl(px, py, side);
     };
     // Listen on the window so the racket keeps tracking when the cursor
     // slips off the canvas while chasing a ball near the table edge.
@@ -464,10 +545,10 @@ export default function GameClient({ room, intent }: Props) {
     let lastSent = "";
     const sender = setInterval(() => {
       const r = racketRef.current;
-      const key = `${r.x.toFixed(1)}:${r.y.toFixed(1)}`;
+      const key = `${r.x.toFixed(1)}:${r.y.toFixed(1)}:${r.z.toFixed(1)}`;
       if (key !== lastSent) {
         lastSent = key;
-        sendMessage({ type: "racket", x: r.x, y: r.y });
+        sendMessage({ type: "racket", x: r.x, y: r.y, z: r.z });
       }
     }, 33);
 
@@ -845,77 +926,96 @@ function drawFrame(
     return names[seatIndex] ?? `Player ${seatIndex + 1}`;
   };
 
-  // Far side rackets (the viewer's opponents), with name labels.
-  let farCount = 0;
-  state.seats.forEach((seat, i) => {
-    if (seat.side === viewerSide) return;
-    const p = project(seat.racket.x, seat.racket.y, PLAYER_Z[seat.side], flip);
-    drawRacket(ctx, p, FAR_COLORS[farCount % FAR_COLORS.length]!);
-    drawLabel(ctx, p, labelFor(i, false));
-    farCount += 1;
-  });
-
-  // Ball shadow, then ball.
+  // Rackets and ball are painted back to front by their distance from the
+  // camera. A fixed order would do while every racket lived on its own end,
+  // but a racket that has stepped out over the table can now be nearer or
+  // further than the ball, and painting it on the wrong side of one is the
+  // clearest possible lie about where it is.
   const showBall = state.status === "playing" || state.status === "countdown";
-  if (showBall) {
-    const shadow = project(state.ball.x, 0, state.ball.z, flip);
-    ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
-    ctx.beginPath();
-    ctx.ellipse(
-      shadow.x,
-      shadow.y,
-      Math.max(3, BALL_RADIUS * shadow.scale),
-      Math.max(1.5, BALL_RADIUS * shadow.scale * 0.35),
-      0,
-      0,
-      Math.PI * 2,
-    );
-    ctx.fill();
+  const bodies: { viewZ: number; mine: boolean; paint: () => void }[] = [];
 
-    // Spin tint: the whole streak takes the ball's current spin, so a heavy
-    // ball reads as one coloured arc rather than a gradient of stale spins.
-    const tint = spinBucket(state.ball.spinTop);
-    const trailRow = TRAIL_COLORS[tint];
-
-    // Motion trail: recent positions fade and shrink behind the ball.
-    for (const point of trail) {
-      const age = Math.min((now - point.at) / TRAIL_MS, 1);
-      const p = project(point.x, point.y, point.z, flip);
-      ctx.fillStyle =
-        trailRow?.[Math.min(TRAIL_STEPS - 1, (age * TRAIL_STEPS) | 0)] ?? "#ffd34d";
-      ctx.beginPath();
-      ctx.arc(
-        p.x,
-        p.y,
-        Math.max(1.5, BALL_RADIUS * p.scale * 1.2 * (1 - age * 0.6)),
-        0,
-        Math.PI * 2,
-      );
-      ctx.fill();
-    }
-
-    const ball = project(state.ball.x, state.ball.y, state.ball.z, flip);
-    ctx.fillStyle = BALL_COLORS[tint] ?? "#ffd34d";
-    ctx.beginPath();
-    ctx.arc(ball.x, ball.y, Math.max(3, BALL_RADIUS * ball.scale * 1.2), 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Near side rackets last so they overlap everything, like first-person
-  // paddles. Teammate first, the viewer's own racket on top.
-  const nearSeats = state.seats
-    .map((seat, i) => ({ seat, i }))
-    .filter(({ seat }) => seat.side === viewerSide)
-    .sort((a, b) => Number(a.seat.id === mySeatId) - Number(b.seat.id === mySeatId));
+  let farCount = 0;
   let nearCount = 0;
-  for (const { seat, i } of nearSeats) {
+  for (const [i, seat] of state.seats.entries()) {
     const isMine = seat.id === mySeatId;
+    const isNear = seat.side === viewerSide;
     const racket = isMine && localRacket ? localRacket : seat.racket;
-    const p = project(racket.x, racket.y, PLAYER_Z[seat.side], flip);
-    drawRacket(ctx, p, NEAR_COLORS[isMine ? 0 : (1 + nearCount) % NEAR_COLORS.length]!);
-    drawLabel(ctx, p, labelFor(i, isMine));
-    nearCount += 1;
+    // Depth is missing from a room server too old to know about it.
+    const z = racket.z ?? PLAYER_Z[seat.side];
+    const color = isNear
+      ? NEAR_COLORS[isMine ? 0 : (1 + nearCount++) % NEAR_COLORS.length]!
+      : FAR_COLORS[farCount++ % FAR_COLORS.length]!;
+    bodies.push({
+      viewZ: flip ? TABLE_LENGTH - z : z,
+      mine: isMine,
+      paint: () => {
+        const p = project(racket.x, racket.y, z, flip);
+        drawRacket(ctx, p, color);
+        drawLabel(ctx, p, labelFor(i, isMine));
+      },
+    });
   }
+
+  if (showBall) {
+    bodies.push({
+      viewZ: flip ? TABLE_LENGTH - state.ball.z : state.ball.z,
+      mine: false,
+      paint: () => {
+        const shadow = project(state.ball.x, 0, state.ball.z, flip);
+        ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+        ctx.beginPath();
+        ctx.ellipse(
+          shadow.x,
+          shadow.y,
+          Math.max(3, BALL_RADIUS * shadow.scale),
+          Math.max(1.5, BALL_RADIUS * shadow.scale * 0.35),
+          0,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+
+        // Spin tint: the whole streak takes the ball's current spin, so a heavy
+        // ball reads as one coloured arc rather than a gradient of stale spins.
+        const tint = spinBucket(state.ball.spinTop);
+        const trailRow = TRAIL_COLORS[tint];
+
+        // Motion trail: recent positions fade and shrink behind the ball.
+        for (const point of trail) {
+          const age = Math.min((now - point.at) / TRAIL_MS, 1);
+          const p = project(point.x, point.y, point.z, flip);
+          ctx.fillStyle =
+            trailRow?.[Math.min(TRAIL_STEPS - 1, (age * TRAIL_STEPS) | 0)] ?? "#ffd34d";
+          ctx.beginPath();
+          ctx.arc(
+            p.x,
+            p.y,
+            Math.max(1.5, BALL_RADIUS * p.scale * 1.2 * (1 - age * 0.6)),
+            0,
+            Math.PI * 2,
+          );
+          ctx.fill();
+        }
+
+        const ball = project(state.ball.x, state.ball.y, state.ball.z, flip);
+        ctx.fillStyle = BALL_COLORS[tint] ?? "#ffd34d";
+        ctx.beginPath();
+        ctx.arc(
+          ball.x,
+          ball.y,
+          Math.max(3, BALL_RADIUS * ball.scale * 1.2),
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+      },
+    });
+  }
+
+  // Furthest first; the viewer's own racket wins any tie, so a teammate
+  // standing at the same depth never paints over the paddle being aimed.
+  bodies.sort((a, b) => b.viewZ - a.viewZ || Number(a.mine) - Number(b.mine));
+  for (const body of bodies) body.paint();
 
   if (state.status === "countdown") {
     ctx.fillStyle = "#f3f5f9";
