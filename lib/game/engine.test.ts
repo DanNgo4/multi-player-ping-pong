@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   BALL_RADIUS,
   COUNTDOWN_SECONDS,
+  FLOOR_Y,
+  HIT_HEIGHT,
+  HOLD_BALL_WINDOW,
   MAX_SPIN,
   MISS_MARGIN,
   NET_HEIGHT,
   NET_Z,
   PLAYER_Z,
+  POWER_BOOST,
   RACKET_VEL_DECAY,
   RENDER_LAG_TICKS,
   SERVE_DELAY,
@@ -164,8 +168,26 @@ describe("countdown and serve", () => {
     state.seats[0]!.vel = { x: 900, y: -900 };
     step(state, TICK);
     expect(state.live).toBe(true);
-    expect(state.ball.vz).toBe(SHOT_SPEED_Z);
+    // A serve never gains raw power from the swipe; a chopped one gives some up.
+    expect(state.ball.vz).toBeLessThan(SHOT_SPEED_Z);
     expect(state.ball.spinTop).toBeLessThan(0);
+    expect(serveLandsIn(state)).toBe(true);
+  });
+
+  it("delivers a heavy chopped serve at full backspin rather than scaling it away", () => {
+    // A backspin serve used to be launched higher (symmetric lift tilt) and
+    // then floated by the Magnus term, so its pre-simulated flight always ran
+    // past the far baseline and the scale ladder cut the spin down. Pushed
+    // flat and slow instead, the same chop is legal at full strength.
+    const state = seatedState();
+    state.status = "playing";
+    state.live = false;
+    state.serveTimer = 0.01;
+    state.seats[0]!.vel = { x: 0, y: -900 };
+    step(state, TICK);
+    expect(state.live).toBe(true);
+    expect(state.ball.spinTop).toBeCloseTo(-MAX_SPIN, 6);
+    expect(state.ball.vz).toBeLessThan(SHOT_SPEED_Z);
     expect(serveLandsIn(state)).toBe(true);
   });
 
@@ -835,13 +857,180 @@ describe("scoring", () => {
     // Side 1 scores twice; side 0 serves both times, alternating players.
     scoreFor(state, 1);
     expect(state.server).toBe(0);
+    // The dead ball coasts through the first part of the serve delay; it only
+    // lands on the serving player's racket once the hold window opens.
+    state.serveTimer = HOLD_BALL_WINDOW;
     step(state, TICK);
     const firstServeX = state.ball.x;
-    state.serveTimer = 10;
     scoreFor(state, 1);
+    state.serveTimer = HOLD_BALL_WINDOW;
     step(state, TICK);
     const secondServeX = state.ball.x;
     expect([firstServeX, secondServeX].sort()).toEqual([-75, 75]);
+  });
+});
+
+describe("dead ball flight", () => {
+  /** Scores for side 0 with the ball still travelling, and returns the state. */
+  const pointJustEnded = (): GameState => {
+    const state = liveState();
+    state.seats[0]!.racket.x = -90;
+    state.lastHitter = 0;
+    state.bouncedSinceHit = true;
+    state.ball.x = 40;
+    state.ball.y = 70;
+    state.ball.z = PLAYER_Z[1] + DEAD_PAST_PLANE;
+    state.ball.vx = 20;
+    state.ball.vy = -100;
+    state.ball.vz = SHOT_SPEED_Z;
+    step(state, TICK);
+    expect(state.scores).toEqual([1, 0]);
+    expect(state.live).toBe(false);
+    return state;
+  };
+
+  /**
+   * Steps up to — but never into — the serve hold window, so callers can assert
+   * on the coast itself. The loop guard subtracts a tick because the condition
+   * is tested before the step, and one more step would park the ball.
+   */
+  const coastToHoldWindow = (state: GameState, check?: () => void): void => {
+    while (state.serveTimer - TICK > HOLD_BALL_WINDOW) {
+      step(state, TICK);
+      expect(state.live).toBe(false);
+      check?.();
+    }
+  };
+
+  it("lets the ball fly on after a point instead of snapping it to the server", () => {
+    const state = pointJustEnded();
+    // The point is over, but the ball is mid-air: it has to finish its arc,
+    // not teleport onto the next server's racket the very next tick.
+    expect(state.ball.vz).toBeGreaterThan(0);
+    const before = { ...state.ball };
+    step(state, TICK);
+    expect(state.ball.z).toBeGreaterThan(before.z);
+    expect(state.ball.y).toBeLessThan(before.y);
+    expect(state.ball.x).not.toBe(state.seats[1]!.racket.x);
+  });
+
+  it("parks the ball on the server's racket once the hold window opens", () => {
+    const state = pointJustEnded();
+    const server = state.seats.find((s) => s.side === state.server)!;
+    server.racket.x = 62;
+    coastToHoldWindow(state);
+    expect(state.ball.x).not.toBeCloseTo(62, 6);
+    expect(state.coasting).toBe(true);
+    // Crossing into the hold window: the serve is visibly held from here on.
+    step(state, TICK);
+    expect(state.coasting).toBe(false);
+    expect(state.ball.x).toBe(62);
+    expect(state.ball.z).toBe(TABLE_LENGTH);
+    expect(state.ball.vz).toBe(0);
+    expect(state.ball.spinTop).toBe(0);
+  });
+
+  it("never scores again off the coasting ball", () => {
+    const state = pointJustEnded();
+    // Aim the dead ball back through the table and both racket planes: every
+    // path that could award a point has to be inert while it coasts.
+    state.ball.vz = -SHOT_SPEED_Z * 2;
+    state.ball.vy = -400;
+    while (state.serveTimer > TICK) step(state, TICK);
+    expect(state.scores).toEqual([1, 0]);
+    expect(state.netTouched).toBe(false);
+    expect(state.lastHitter).toBeNull();
+  });
+
+  it("settles the coasting ball rather than dropping it forever", () => {
+    const state = pointJustEnded();
+    state.ball.vy = -600;
+    coastToHoldWindow(state, () => {
+      expect(state.ball.y).toBeGreaterThanOrEqual(FLOOR_Y);
+    });
+  });
+
+  it("stops the coasting ball receding before it reaches the camera", () => {
+    // The client projects from behind the viewer's own end, dividing by the
+    // distance to the camera. A dead ball that kept a full-speed vz for the
+    // whole serve delay would swell across the canvas and then turn inside
+    // out as it passed the lens, so it has to stop receding and drop.
+    for (const dir of [1, -1]) {
+      const state = pointJustEnded();
+      state.ball.z = dir === 1 ? PLAYER_Z[1] : PLAYER_Z[0];
+      state.ball.vz = dir * SHOT_SPEED_Z * 1.5;
+      state.ball.vy = 0;
+      coastToHoldWindow(state, () => {
+        expect(state.ball.z).toBeGreaterThan(PLAYER_Z[0] - MISS_MARGIN * 4);
+        expect(state.ball.z).toBeLessThan(PLAYER_Z[1] + MISS_MARGIN * 4);
+      });
+    }
+  });
+
+  it("never pops the coasting ball up through the table top", () => {
+    // A ball that has already fallen below the table and drifts back over its
+    // footprint must keep going down to the floor: the table is a surface
+    // only to a ball arriving on it from above.
+    const state = pointJustEnded();
+    state.ball.x = TABLE_WIDTH / 2 + 20;
+    state.ball.y = FLOOR_Y + 30;
+    state.ball.z = NET_Z;
+    state.ball.vx = -200;
+    state.ball.vy = -10;
+    state.ball.vz = 0;
+    coastToHoldWindow(state, () => {
+      expect(state.ball.y).toBeLessThan(0);
+    });
+    expect(Math.abs(state.ball.x)).toBeLessThan(TABLE_WIDTH / 2);
+  });
+
+  it("leaves a settled ball lying where it stopped until the hold window", () => {
+    // Zeroing the velocity on settling must not read as "nothing to coast" —
+    // that would teleport the ball into the server's hand the moment it came
+    // to rest, and the rest position would never be seen.
+    const state = pointJustEnded();
+    state.ball.vx = 0;
+    state.ball.vy = 0;
+    state.ball.vz = 0;
+    state.ball.y = FLOOR_Y + BALL_RADIUS;
+    const settled = { ...state.ball };
+    coastToHoldWindow(state, () => {
+      expect(state.coasting).toBe(true);
+      expect(state.ball.x).toBe(settled.x);
+      expect(state.ball.y).toBe(settled.y);
+      expect(state.ball.z).toBe(settled.z);
+    });
+    step(state, TICK);
+    expect(state.coasting).toBe(false);
+    expect(state.ball.y).toBe(HIT_HEIGHT);
+  });
+
+  it("parks the ball when play is suspended mid-coast", () => {
+    // A player dropping out during the coast would otherwise strand the dead
+    // ball in mid-air for the whole of the next countdown.
+    const state = pointJustEnded();
+    step(state, TICK);
+    expect(state.coasting).toBe(true);
+    suspendPlay(state);
+    expect(state.coasting).toBe(false);
+    expect(state.ball.y).toBe(HIT_HEIGHT);
+    expect(state.ball.z).toBe(TABLE_LENGTH);
+    expect(state.ball.vz).toBe(0);
+  });
+
+  it("still freezes the ball when the game ends", () => {
+    const state = liveState();
+    state.scores = [WIN_SCORE - 1, 0];
+    state.lastHitter = 0;
+    state.bouncedSinceHit = true;
+    state.ball.y = 70;
+    state.ball.z = PLAYER_Z[1] + DEAD_PAST_PLANE;
+    state.ball.vz = SHOT_SPEED_Z;
+    step(state, TICK);
+    expect(state.status).toBe("gameover");
+    const resting = { ...state.ball };
+    step(state, TICK);
+    expect(state.ball).toEqual(resting);
   });
 });
 
@@ -928,6 +1117,148 @@ describe("spin", () => {
     };
     expect(hit(700)).toBeLessThan(hit(0));
     expect(hit(-700)).toBeGreaterThan(hit(0));
+  });
+
+  it("takes pace off a chopped shot but never off a topspin one", () => {
+    const hit = (velY: number): number => {
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.x = 20;
+      state.ball.y = 50;
+      state.ball.z = PLAYER_Z[0] + 20;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.seats[0]!.racket = { x: 25, y: 55 };
+      state.seats[0]!.vel = { x: 0, y: velY };
+      step(state, TICK);
+      return state.ball.vz;
+    };
+    // A chop is a slow, floating ball: the harder it is chopped, the less
+    // forward speed it keeps. Without this the float alone carried every
+    // chopped return past the far baseline.
+    expect(hit(-900)).toBeLessThan(hit(-300));
+    expect(hit(-300)).toBeLessThan(hit(0));
+    // Topspin and flat shots are untouched — a fast upward swipe still drives.
+    expect(hit(0)).toBe(SHOT_SPEED_Z);
+    expect(hit(900)).toBeGreaterThan(SHOT_SPEED_Z);
+  });
+
+  it("never lets a chop outpace a flat push, however fast the swipe", () => {
+    const vzOf = (velX: number, velY: number): number => {
+      const state = liveState();
+      state.lastHitter = 1;
+      state.ball.x = 20;
+      state.ball.y = 50;
+      state.ball.z = PLAYER_Z[0] + 20;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.seats[0]!.racket = { x: 25, y: 55 };
+      state.seats[0]!.vel = { x: velX, y: velY };
+      step(state, TICK);
+      return state.ball.vz;
+    };
+    // Stripping only the downward part of the swipe left a loophole: a chop
+    // swung mostly sideways kept the full power boost and left the blade
+    // faster than a flat push, which is the opposite of what a chop does.
+    for (const velX of [0, 450, 900, -900]) {
+      expect(vzOf(velX, -900)).toBeLessThan(SHOT_SPEED_Z);
+      // And a chop is always slower than the same swing without it.
+      expect(vzOf(velX, -900)).toBeLessThan(vzOf(velX, 0));
+    }
+  });
+
+  it("brakes the bounce with backspin, harder the heavier the chop", () => {
+    const bounceVz = (spinTop: number): number => {
+      const state = liveState();
+      state.ball.z = NET_Z + 60;
+      state.ball.y = BALL_RADIUS + 1;
+      state.ball.vy = -300;
+      state.ball.vz = 400;
+      state.ball.spinTop = spinTop;
+      step(state, TICK);
+      return state.ball.vz;
+    };
+    expect(bounceVz(-MAX_SPIN)).toBeLessThan(bounceVz(-200));
+    expect(bounceVz(-200)).toBeLessThan(bounceVz(0));
+  });
+
+  it("lands a chopped return on the receiving side across the chop range", () => {
+    // The player-visible symptom of the old symmetric lift: a chop of any real
+    // strength flew long, so backspin only ever lost points. Sweep contact
+    // heights against chop strengths and require every return to bounce in.
+    /**
+     * Plays out one return, reporting whether it bounced on the receiving side
+     * and how far up the table it carried — `carryZ` being the z at which it
+     * first descends through table height, which measures length alone.
+     * (Where a *dead* ball ends up is no use here: one that misses the table
+     * sideways keeps going, so it always "reaches" further than one that
+     * bounced, whatever its pace.)
+     */
+    const shot = (
+      contactY: number,
+      velX: number,
+      velY: number,
+    ): { landedIn: boolean; carryZ: number } => {
+      const state = liveState();
+      state.lastHitter = 1;
+      state.bouncedSinceHit = true;
+      state.ball.x = 0;
+      state.ball.y = contactY;
+      state.ball.z = PLAYER_Z[0] + 20;
+      state.ball.vz = -SHOT_SPEED_Z;
+      state.seats[0]!.racket = { x: 0, y: contactY };
+      state.seats[0]!.vel = { x: velX, y: velY };
+      // Park the receiver out of reach so only the flight is under test.
+      state.seats[1]!.racket = { x: 900, y: 900 };
+      step(state, TICK);
+      if (velY < 0) expect(state.ball.spinTop).toBeLessThan(0);
+      let carryZ = NaN;
+      for (let t = 0; t < 3; t += TICK) {
+        const prevY = state.ball.y;
+        step(state, TICK);
+        // First descent to table height, whether or not the table is under it.
+        if (Number.isNaN(carryZ) && prevY > BALL_RADIUS && state.ball.y <= BALL_RADIUS) {
+          carryZ = state.ball.z;
+        }
+        if (state.bouncedSinceHit && state.ball.z > NET_Z) return { landedIn: true, carryZ };
+        if (state.scores[0] !== 0 || state.scores[1] !== 0) {
+          return { landedIn: false, carryZ };
+        }
+      }
+      return { landedIn: false, carryZ };
+    };
+
+    for (const contactY of [20, 40, 80, 140]) {
+      for (const velY of [-100, -300, -500, -700, -900]) {
+        // A straight chop has to land from every sane contact height: this is
+        // the shot players were told did nothing, and it faulted long instead.
+        expect(
+          shot(contactY, 0, velY).landedIn,
+          `chop y=${contactY} velY=${velY} did not land in`,
+        ).toBe(true);
+
+        // Swung sideways as well — the case that used to keep the full power
+        // boost. Length is the axis backspin broke, so length is what is
+        // asserted: a chop must never carry the ball further up the table than
+        // the same swing without it. Whether a violent sideways swipe lands is
+        // a question of aim, and a floatier ball curving further off the side
+        // is the side spin doing its job, not the chop failing.
+        //
+        // Carry is sampled once per tick, so the comparison allows one tick of
+        // travel at the fastest a shot can leave the blade. The behaviour this
+        // guards against overshot by hundreds of units, so the slack is free.
+        const slack = SHOT_SPEED_Z * (1 + POWER_BOOST) * TICK;
+        for (const velX of [-300, 300, -900, 900]) {
+          const flat = shot(contactY, velX, 0);
+          const chopped = shot(contactY, velX, velY);
+          // A shot that never comes back down inside the simulated window is
+          // off the end of the world; there is no length to compare.
+          if (Number.isNaN(flat.carryZ) || Number.isNaN(chopped.carryZ)) continue;
+          expect(
+            chopped.carryZ,
+            `chop y=${contactY} velY=${velY} velX=${velX} carried further than flat`,
+          ).toBeLessThanOrEqual(flat.carryZ + slack);
+        }
+      }
+    }
   });
 
   it("fades tracked racket velocity over time", () => {

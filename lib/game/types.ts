@@ -64,6 +64,15 @@ export interface GameState {
   serveTimer: number;
   /** True while the ball is in flight. */
   live: boolean;
+  /**
+   * True while the ball is a dead body finishing its flight: the point is
+   * already scored, and it is coasting (or lying where it stopped) until the
+   * serve hold parks it on the server's racket. Distinct from `!live` alone,
+   * which also covers a ball that never launched — that one is held from the
+   * first tick. Clients read it to keep smoothing and trailing the dead ball,
+   * and to break interpolation on the one frame it snaps to the racket.
+   */
+  coasting: boolean;
   lastHitter: PlayerIndex | null;
   /** True once the last shot has bounced on the receiving side of the table. */
   bouncedSinceHit: boolean;
@@ -83,6 +92,7 @@ export function createInitialState(): GameState {
     serveTurns: [0, 0],
     serveTimer: 0,
     live: false,
+    coasting: false,
     lastHitter: null,
     bouncedSinceHit: false,
     netTouched: false,

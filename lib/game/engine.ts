@@ -1,6 +1,9 @@
 import {
   AIM_FACTOR,
+  BACKSPIN_PACE_LOSS,
   BALL_RADIUS,
+  COAST_BOUNCE_DAMP,
+  COAST_Z_MARGIN,
   COUNTDOWN_SECONDS,
   FLOOR_Y,
   GRAVITY,
@@ -8,6 +11,7 @@ import {
   HIT_HEIGHT,
   HIT_RADIUS,
   HIT_RADIUS_BELOW,
+  HOLD_BALL_WINDOW,
   MAGNUS_SIDE,
   MAGNUS_TOP,
   MAX_RACKET_SPEED,
@@ -31,7 +35,9 @@ import {
   SPIN_CARRY,
   SPIN_DECAY_ON_BOUNCE,
   SPIN_FACTOR,
+  SPIN_FLOAT_FACTOR,
   SPIN_LIFT_TILT,
+  SPIN_LIFT_TILT_BACK,
   SPIN_RECEIVE_LIFT,
   SPIN_RECEIVE_SIDE,
   TABLE_LENGTH,
@@ -121,11 +127,9 @@ export function suspendPlay(state: GameState): void {
   state.status = "waiting";
   state.live = false;
   state.countdown = 0;
-  state.ball.vx = 0;
-  state.ball.vy = 0;
-  state.ball.vz = 0;
-  state.ball.spinSide = 0;
-  state.ball.spinTop = 0;
+  // Park the ball as well as stopping it: suspending mid-coast would otherwise
+  // strand a dead ball in mid-air for the whole of the next countdown.
+  holdBall(state);
   state.lastHitter = null;
   state.bouncedSinceHit = false;
   state.netTouched = false;
@@ -176,8 +180,17 @@ export function step(
   }
 
   if (!state.live) {
-    holdBall(state);
     state.serveTimer -= dt;
+    // A point that just ended leaves the ball in flight: let it finish its arc
+    // as a scenery object — gravity and bounces only, no net, no hits, no
+    // scoring — and park it on the server's racket for the tail of the delay,
+    // so the serve is still visibly held. A ball that never launched (the
+    // first serve of a game) has nothing to coast and is held throughout.
+    if (state.serveTimer <= HOLD_BALL_WINDOW || !state.coasting) {
+      holdBall(state);
+    } else {
+      coastBall(state, dt);
+    }
     if (state.serveTimer <= 0) launchServe(state, rand);
     return state;
   }
@@ -191,8 +204,8 @@ export function step(
   // topspin adds dip beyond gravity; backspin (negative) floats the ball.
   const travel = Math.sign(ball.vz) || 1;
   ball.vx += ball.spinSide * MAGNUS_SIDE * travel * dt;
-  // Backspin float is halved so a chopped ball hangs but never soars upward.
-  ball.vy -= ball.spinTop * MAGNUS_TOP * (ball.spinTop > 0 ? 1 : 0.5) * dt;
+  // Backspin float is damped so a chopped ball hangs but never soars upward.
+  ball.vy -= ball.spinTop * MAGNUS_TOP * floatFactor(ball.spinTop) * dt;
   // Air drags on the rotation too, so spin bleeds away over the flight. This
   // must stay in step with the same decay inside serveIsLegal().
   const spinDecay = Math.max(0, 1 - SPIN_AIR_DECAY * dt);
@@ -316,6 +329,77 @@ export function step(
   return state;
 }
 
+/**
+ * Magnus multiplier for the ball's vertical spin term: topspin dips at full
+ * strength, backspin floats at a damped fraction of it. `step` and
+ * `serveIsLegal` both go through here so the predicted flight is the real one.
+ */
+function floatFactor(spinTop: number): number {
+  return spinTop >= 0 ? 1 : SPIN_FLOAT_FACTOR;
+}
+
+/**
+ * How much the launch angle tilts per unit of spin. Topspin flattens the shot
+ * hard; backspin lifts it, but only a little. The asymmetry is the point: a
+ * chop that launched as much higher as a loop launches lower would fly the
+ * length of the table, which is precisely what used to make backspin unusable.
+ */
+function liftTilt(spinTop: number): number {
+  return spinTop >= 0 ? SPIN_LIFT_TILT : SPIN_LIFT_TILT_BACK;
+}
+
+/**
+ * Forward-speed multiplier for a shot brushed with `spinTop` by the hitter's
+ * own swipe. Backspin bleeds pace off the ball in proportion to how hard it
+ * was chopped; topspin and flat shots are untouched.
+ */
+function backspinPace(spinTop: number): number {
+  return spinTop >= 0 ? 1 : 1 - Math.min(-spinTop / MAX_SPIN, 1) * BACKSPIN_PACE_LOSS;
+}
+
+/**
+ * Cosmetic flight for a ball that is already dead: the point is scored, the
+ * rally is over, and this only stops the ball vanishing out of mid-air. It
+ * runs gravity and a bounce off whatever surface is under the ball, and
+ * nothing else — no spin, no net, no hit checks, no scoring — so it cannot
+ * change the match.
+ */
+function coastBall(state: GameState, dt: number): void {
+  const ball = state.ball;
+  // Already come to rest: it stays exactly where it stopped, so the settled
+  // ball renders as a still body rather than jittering on the spot.
+  if (ball.vx === 0 && ball.vy === 0 && ball.vz === 0) return;
+  const prevY = ball.y;
+  ball.vy -= GRAVITY * dt;
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+  ball.z += ball.vz * dt;
+  // Clear of the table and still receding: stop it running away from — or
+  // into — the camera and let it fall where the player missed it.
+  if (ball.z < PLAYER_Z[0] - COAST_Z_MARGIN || ball.z > PLAYER_Z[1] + COAST_Z_MARGIN) {
+    ball.vz = 0;
+  }
+  // The table is only a surface to a ball coming down onto it from above. One
+  // that is already below the top and drifts back over the footprint has to
+  // keep falling to the floor, not pop up through the wood.
+  const overTable =
+    ball.z >= 0 &&
+    ball.z <= TABLE_LENGTH &&
+    Math.abs(ball.x) <= TABLE_WIDTH / 2 &&
+    prevY >= BALL_RADIUS;
+  const rest = (overTable ? 0 : FLOOR_Y) + BALL_RADIUS;
+  if (ball.vy >= 0 || ball.y > rest) return;
+  ball.y = rest;
+  ball.vy = -ball.vy * TABLE_RESTITUTION;
+  ball.vx *= COAST_BOUNCE_DAMP;
+  ball.vz *= COAST_BOUNCE_DAMP;
+  if (ball.vy < MIN_BOUNCE_VY) {
+    ball.vx = 0;
+    ball.vy = 0;
+    ball.vz = 0;
+  }
+}
+
 function servingSeat(state: GameState): Seat | null {
   const mates = state.seats.filter((s) => s.side === state.server);
   if (mates.length === 0) return null;
@@ -345,15 +429,25 @@ function shoot(
   const inDrift = inSide * -dir;
   // A moving racket brushes spin onto the ball: lateral movement gives side
   // spin, upward movement gives topspin (downward chop gives backspin) —
-  // and overall swipe speed adds raw shot power.
-  const swipe = Math.min(Math.hypot(seat.vel.x, seat.vel.y) / MAX_RACKET_SPEED, 1);
+  // and swipe speed adds raw shot power. Only sideways and upward motion
+  // counts toward that power: a chop takes pace *off* the ball, so a downward
+  // swipe must not double as a drive.
+  const swipe = Math.min(
+    Math.hypot(seat.vel.x, Math.max(seat.vel.y, 0)) / MAX_RACKET_SPEED,
+    1,
+  );
   const spinTop = clamp(seat.vel.y * SPIN_FACTOR, -MAX_SPIN, MAX_SPIN);
-  ball.vz = SHOT_SPEED_Z * dir * (1 + swipe * POWER_BOOST);
-  // Topspin shots launch flatter, backspin shots float higher. On top of that
+  // Backspin bleeds the base speed *and* the swipe's boost, so the harder the
+  // chop the less of the swing reaches the ball. Stripping only the downward
+  // part of the swipe was not enough: a fast sideways chop kept the full boost
+  // and came out quicker than a flat push, which is not a chop at all.
+  const pace = backspinPace(spinTop);
+  ball.vz = SHOT_SPEED_Z * dir * pace * (1 + swipe * POWER_BOOST * pace);
+  // Topspin shots launch flatter, backspin shots a touch higher. On top of that
   // the incoming ball's own spin fights the blade: its topspin climbs off the
   // face and carries long, its backspin drags the return down toward the net.
   // A heavy ball therefore has to be answered with the swipe, not blocked.
-  ball.vy = SHOT_LIFT - spinTop * SPIN_LIFT_TILT + inTop * SPIN_RECEIVE_LIFT;
+  ball.vy = SHOT_LIFT - spinTop * liftTilt(spinTop) + inTop * SPIN_RECEIVE_LIFT;
   // Side spin pushes the return on the way the incoming ball was curving, so
   // a hooking ball has to be aimed against.
   ball.vx =
@@ -402,16 +496,24 @@ function awardPoint(state: GameState, to: PlayerIndex): void {
     state.status = "gameover";
     state.winner = to;
     state.live = false;
+    state.coasting = false;
     state.ball.vx = 0;
     state.ball.vy = 0;
     state.ball.vz = 0;
     return;
   }
   state.server = opponent(to);
-  prepareServe(state);
+  // The rally's last ball keeps its velocity so it can coast to a stop on
+  // screen; `step` parks it on the server's racket later in the serve delay.
+  prepareServe(state, true);
 }
 
-function prepareServe(state: GameState): void {
+/**
+ * Sets up the next serve. `coast` leaves the ball's motion alone — used when a
+ * point has just ended and the dead ball should finish its flight; otherwise
+ * the ball is parked on the server's racket straight away.
+ */
+function prepareServe(state: GameState, coast = false): void {
   state.live = false;
   state.serveTimer = SERVE_DELAY;
   state.lastHitter = null;
@@ -419,12 +521,14 @@ function prepareServe(state: GameState): void {
   state.netTouched = false;
   // Another serve for this side: its duo (if any) rotates the server.
   state.serveTurns[state.server] += 1;
-  holdBall(state);
+  state.coasting = coast;
+  if (!coast) holdBall(state);
 }
 
 /** While waiting to serve, the ball tracks the serving player's racket. */
 function holdBall(state: GameState): void {
   const seat = servingSeat(state);
+  state.coasting = false;
   state.ball.x = seat ? seat.racket.x : 0;
   state.ball.y = HIT_HEIGHT;
   state.ball.z = state.server === 0 ? 0 : TABLE_LENGTH;
@@ -465,14 +569,14 @@ function serveIsLegal(
   let curSide = spinSide;
   let curTop = spinTop;
   const spinDecay = Math.max(0, 1 - SPIN_AIR_DECAY * dt);
-  const floatFactor = spinTop > 0 ? 1 : 0.5;
+  const float = floatFactor(spinTop);
   const travel = Math.sign(vz) || 1;
   for (let i = 0; i < TICK_HZ * 3; i++) {
     const prevY = y;
     const prevZ = z;
     vy -= GRAVITY * dt;
     vx += curSide * MAGNUS_SIDE * travel * dt;
-    vy -= curTop * MAGNUS_TOP * floatFactor * dt;
+    vy -= curTop * MAGNUS_TOP * float * dt;
     curSide *= spinDecay;
     curTop *= spinDecay;
     x += vx * dt;
@@ -507,7 +611,6 @@ function launchServe(state: GameState, rand: Rand): void {
   const ball = state.ball;
   const dir = seat.side === 0 ? 1 : -1;
   const vx = (rand() * 2 - 1) * 30;
-  const vz = SHOT_SPEED_Z * dir;
   // Racket motion at launch styles the serve — topspin, backspin, or side
   // curve — but never adds raw power. The flight is pre-simulated and the
   // spin scaled down until the serve is guaranteed to land on the receiving
@@ -517,7 +620,11 @@ function launchServe(state: GameState, rand: Rand): void {
   for (const scale of SERVE_SPIN_SCALES) {
     const spinSide = rawSide * scale;
     const spinTop = rawTop * scale;
-    const vy = SHOT_LIFT - spinTop * SPIN_LIFT_TILT;
+    // Same launch profile as a rally shot, minus the swipe's power boost: a
+    // chopped serve leaves flat and slow, which is what lets it stay short
+    // enough to be legal at full spin instead of being scaled away.
+    const vy = SHOT_LIFT - spinTop * liftTilt(spinTop);
+    const vz = SHOT_SPEED_Z * dir * backspinPace(spinTop);
     if (scale !== 0 && !serveIsLegal(seat.side, ball.x, vx, vy, vz, spinSide, spinTop)) {
       continue;
     }

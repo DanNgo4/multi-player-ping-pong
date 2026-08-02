@@ -6,6 +6,7 @@ import usePartySocket from "partysocket/react";
 import {
   BALL_RADIUS,
   HIT_HEIGHT,
+  MAX_SPIN,
   NET_HEIGHT,
   NET_Z,
   PLAYER_Z,
@@ -109,13 +110,54 @@ interface TrailPoint {
   at: number;
 }
 
-/** Trail alpha quantised into buckets: a lookup beats building an rgba string
- * per point per frame. */
+type RGB = readonly [number, number, number];
+
+/**
+ * The ball is tinted by the spin it is carrying: red as topspin builds, blue
+ * as backspin does, the usual amber when it is spinning flat. Spin is the one
+ * thing about an incoming ball a player cannot read from its path in time to
+ * answer it, so the colour is what makes the shot legible before it arrives.
+ */
+const BALL_NEUTRAL: RGB = [255, 211, 77];
+const BALL_TOPSPIN: RGB = [255, 74, 58];
+const BALL_BACKSPIN: RGB = [77, 163, 255];
+/** Odd, so the middle bucket is exactly "no spin". */
+const SPIN_STEPS = 13;
+
+function mixRgb(from: RGB, to: RGB, t: number): RGB {
+  return [
+    Math.round(lerp(from[0], to[0], t)),
+    Math.round(lerp(from[1], to[1], t)),
+    Math.round(lerp(from[2], to[2], t)),
+  ];
+}
+
+/**
+ * Both palettes are precomputed: the ball and every trail point are drawn on
+ * each frame, and building rgb/rgba strings there would allocate per point per
+ * frame. Indexing a table costs nothing.
+ */
+const SPIN_RGB: readonly RGB[] = Array.from({ length: SPIN_STEPS }, (_, i) => {
+  const signed = (i / (SPIN_STEPS - 1)) * 2 - 1;
+  return mixRgb(BALL_NEUTRAL, signed >= 0 ? BALL_TOPSPIN : BALL_BACKSPIN, Math.abs(signed));
+});
+const BALL_COLORS: readonly string[] = SPIN_RGB.map((c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`);
+
+/** Trail alpha quantised into buckets, one row of buckets per spin tint. */
 const TRAIL_STEPS = 8;
-const TRAIL_COLORS: readonly string[] = Array.from(
-  { length: TRAIL_STEPS },
-  (_, i) => `rgba(255, 211, 77, ${(0.35 * (1 - (i + 0.5) / TRAIL_STEPS)).toFixed(3)})`,
+const TRAIL_COLORS: readonly (readonly string[])[] = SPIN_RGB.map((c) =>
+  Array.from(
+    { length: TRAIL_STEPS },
+    (_, i) =>
+      `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${(0.35 * (1 - (i + 0.5) / TRAIL_STEPS)).toFixed(3)})`,
+  ),
 );
+
+/** Which tint row a ball carrying `spinTop` is drawn from. */
+function spinBucket(spinTop: number): number {
+  const signed = Math.min(Math.max(spinTop / MAX_SPIN, -1), 1);
+  return Math.round(((signed + 1) / 2) * (SPIN_STEPS - 1));
+}
 
 /**
  * Records the ball's rendered position into a fading motion trail.
@@ -127,13 +169,22 @@ const TRAIL_COLORS: readonly string[] = Array.from(
  * deliberate, so there is no second gate here to keep in sync with it.
  */
 function updateTrail(trail: TrailPoint[], state: GameState, now: number): void {
-  if (state.status !== "playing" || !state.live) {
+  // A dead ball coasting to a stop is still a ball in motion, and it is the
+  // stretch the streak reads best on. Only a held or idle ball has no trail.
+  if (state.status !== "playing" || !(state.live || state.coasting)) {
     trail.length = 0;
     return;
   }
   const last = trail[trail.length - 1];
-  // A teleport (serve reset, lag-compensated hit) breaks the trail.
-  if (last && Math.abs(state.ball.z - last.z) > SNAP_DISTANCE) trail.length = 0;
+  // A teleport (serve reset, lag-compensated hit) breaks the trail. Measured
+  // across all three axes, like the interpolation guard.
+  if (
+    last &&
+    Math.hypot(state.ball.x - last.x, state.ball.y - last.y, state.ball.z - last.z) >
+      SNAP_DISTANCE
+  ) {
+    trail.length = 0;
+  }
   trail.push({ x: state.ball.x, y: state.ball.y, z: state.ball.z, at: now });
   while (trail.length > 0 && now - trail[0]!.at > TRAIL_MS) trail.shift();
 }
@@ -188,12 +239,30 @@ function stamp(state: GameState): Snapshot {
  * 30 Hz network updates look smooth at display refresh rate.
  */
 function interpolate(prev: Snapshot | null, cur: Snapshot, now: number): GameState {
-  if (!prev || cur.state.status !== "playing" || !cur.state.live || !prev.state.live) {
-    return cur.state;
-  }
+  if (!prev || cur.state.status !== "playing") return cur.state;
   const span = cur.at - prev.at;
   if (span <= 0 || span > 250) return cur.state;
-  if (Math.abs(cur.state.ball.z - prev.state.ball.z) > SNAP_DISTANCE) return cur.state;
+  // Smoothing is not gated on the ball being live: a dead ball coasts to a
+  // stop between points and deserves the same 30 Hz -> refresh-rate fill-in.
+  //
+  // What must never be smoothed is a teleport. The serve hold is one, and it
+  // is announced rather than guessed at: the tick the server stops coasting
+  // the ball is the tick it lands on the racket, wherever it had come to rest.
+  // A distance test could not be trusted to catch it, because a ball settling
+  // near the server's end moves only a short way into the hand.
+  if (prev.state.coasting && !cur.state.coasting) return cur.state;
+  // Teleports with no such marker — a lag-compensated hit rewinding the ball
+  // to where the striker saw it — are caught on distance instead, across all
+  // three axes since a rewind moves the ball sideways as much as along z.
+  if (
+    Math.hypot(
+      cur.state.ball.x - prev.state.ball.x,
+      cur.state.ball.y - prev.state.ball.y,
+      cur.state.ball.z - prev.state.ball.z,
+    ) > SNAP_DISTANCE
+  ) {
+    return cur.state;
+  }
   const t = Math.min(Math.max((now - cur.at) / span, 0), 1);
   return {
     ...cur.state,
@@ -803,12 +872,17 @@ function drawFrame(
     );
     ctx.fill();
 
+    // Spin tint: the whole streak takes the ball's current spin, so a heavy
+    // ball reads as one coloured arc rather than a gradient of stale spins.
+    const tint = spinBucket(state.ball.spinTop);
+    const trailRow = TRAIL_COLORS[tint];
+
     // Motion trail: recent positions fade and shrink behind the ball.
     for (const point of trail) {
       const age = Math.min((now - point.at) / TRAIL_MS, 1);
       const p = project(point.x, point.y, point.z, flip);
       ctx.fillStyle =
-        TRAIL_COLORS[Math.min(TRAIL_STEPS - 1, (age * TRAIL_STEPS) | 0)] ?? "#ffd34d";
+        trailRow?.[Math.min(TRAIL_STEPS - 1, (age * TRAIL_STEPS) | 0)] ?? "#ffd34d";
       ctx.beginPath();
       ctx.arc(
         p.x,
@@ -821,7 +895,7 @@ function drawFrame(
     }
 
     const ball = project(state.ball.x, state.ball.y, state.ball.z, flip);
-    ctx.fillStyle = "#ffd34d";
+    ctx.fillStyle = BALL_COLORS[tint] ?? "#ffd34d";
     ctx.beginPath();
     ctx.arc(ball.x, ball.y, Math.max(3, BALL_RADIUS * ball.scale * 1.2), 0, Math.PI * 2);
     ctx.fill();

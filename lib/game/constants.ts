@@ -38,12 +38,49 @@ export const SHOT_SPEED_Z = 540;
 export const SHOT_LIFT = 300;
 /** Max extra forward speed (as a fraction) a full-speed swipe adds to a return. */
 export const POWER_BOOST = 0.5;
-/** Topspin launches flatter, backspin floatier: vy shifts by this per unit of spin. */
+/** Topspin launches flatter: vy drops by this per unit of topspin. */
 export const SPIN_LIFT_TILT = 0.08;
+/**
+ * Backspin's share of that tilt, applied the other way (a chop leaves the blade
+ * slightly higher). Deliberately much weaker than SPIN_LIFT_TILT: a chop is
+ * pushed, not lofted. A symmetric tilt added up to +34 of vy on top of a
+ * SHOT_LIFT already tuned to land mid-table, which — stacked on the backspin
+ * float below — sent every real chop past the far baseline.
+ */
+export const SPIN_LIFT_TILT_BACK = 0.03;
+/**
+ * Fraction of forward speed a full-backspin shot gives up at contact. Taking
+ * pace off is what a chop *is*, and it is what keeps the shot on the table:
+ * the float stretches the flight, so without a matching loss of speed a
+ * chopped ball is simply a long one. Applied from the hitter's own swipe spin,
+ * so a flat block of a heavy ball plays exactly as it always has.
+ */
+export const BACKSPIN_PACE_LOSS = 0.3;
 /** Lateral speed per unit of contact offset from the racket centre. */
 export const AIM_FACTOR = 3.5;
 export const MAX_SIDE_SPEED = 240;
 export const SERVE_DELAY = 1.2;
+/**
+ * Tail of SERVE_DELAY during which the ball is parked on the server's racket.
+ * Ahead of that window a dead ball coasts on under gravity as a cosmetic body,
+ * so a point ends with the ball finishing its flight instead of teleporting
+ * out of mid-air — while the hold is still long enough to read as a serve.
+ */
+export const HOLD_BALL_WINDOW = 0.4;
+/** Lateral and forward speed a coasting dead ball keeps through each bounce. */
+export const COAST_BOUNCE_DAMP = 0.8;
+/**
+ * How far past a racket plane a coasting dead ball may still be travelling
+ * before it stops receding and simply drops where it is.
+ *
+ * The ball is already dead, so nothing about the match depends on where it
+ * ends up — but the client's perspective projection divides by the distance
+ * from the camera, which sits behind the viewer's own plane. A ball that kept
+ * its pace for the whole serve delay would swell to fill the canvas and then
+ * turn inside out as it passed the lens. Dropping it just past the player is
+ * also what actually happens to a ball you have missed.
+ */
+export const COAST_Z_MARGIN = 60;
 
 // Spin: racket velocity at contact brushes spin onto the ball. Side spin
 // curves the flight laterally (Magnus), topspin dips it and kicks it forward
@@ -54,6 +91,13 @@ export const MAX_SPIN = 420;
 export const MAGNUS_SIDE = 1.5;
 /** Extra downward acceleration per unit of topspin. */
 export const MAGNUS_TOP = 1.4;
+/**
+ * Backspin's share of MAGNUS_TOP, so a chopped ball hangs but never soars
+ * upward. Both `step` and `serveIsLegal` read this one constant — the two
+ * flight integrations have to stay identical or a serve judged legal flies
+ * long.
+ */
+export const SPIN_FLOAT_FACTOR = 0.5;
 /** Forward speed gained per unit of topspin when the ball bites the table. */
 export const SPIN_BOUNCE_KICK = 0.4;
 export const SPIN_DECAY_ON_BOUNCE = 0.55;
