@@ -10,12 +10,19 @@ import type { Env } from "./env";
 /** How many finished games the lobby remembers for history/leaderboard. */
 const RESULT_LIMIT = 50;
 
-interface ResultStorage {
+interface LobbyStorage {
   get(key: string): Promise<unknown>;
   put(key: string, value: unknown): Promise<void>;
 }
 
 export class LobbyServer extends Server<Env> {
+  /**
+   * Hibernate between messages: home-page tabs hold sockets open around the
+   * clock, and a pinned lobby object burns the Durable Objects duration
+   * quota. Sockets survive hibernation; memory is restored in onStart.
+   */
+  static override options = { hibernate: true };
+
   matches = new Map<string, MatchInfo>();
   results: MatchResult[] = [];
 
@@ -23,14 +30,21 @@ export class LobbyServer extends Server<Env> {
    * Like `env` in the match server, `ctx` exists at runtime but its type
    * lives in the `cloudflare:workers` ambient module we don't load globally.
    */
-  private get store(): ResultStorage {
-    return (this as unknown as { ctx: { storage: ResultStorage } }).ctx.storage;
+  private get store(): LobbyStorage {
+    return (this as unknown as { ctx: { storage: LobbyStorage } }).ctx.storage;
   }
 
   override async onStart(): Promise<void> {
-    // Results survive lobby restarts; live match listings rebuild themselves.
-    const stored = await this.store.get("results");
-    if (Array.isArray(stored)) this.results = stored as MatchResult[];
+    // Both survive hibernation and restarts; live rooms also re-POST on
+    // every state change, correcting any staleness in the match list.
+    const storedResults = await this.store.get("results");
+    if (Array.isArray(storedResults)) this.results = storedResults as MatchResult[];
+    const storedMatches = await this.store.get("matches");
+    if (Array.isArray(storedMatches)) {
+      this.matches = new Map(
+        (storedMatches as MatchInfo[]).map((m) => [m.id, m]),
+      );
+    }
   }
 
   override onConnect(conn: Connection): void {
@@ -44,19 +58,22 @@ export class LobbyServer extends Server<Env> {
         this.results.unshift(post.result);
         this.results = this.results.slice(0, RESULT_LIMIT);
         await this.store.put("results", this.results);
-      } else if (post.gone) {
-        this.matches.delete(post.id);
       } else {
-        this.matches.set(post.id, {
-          id: post.id,
-          players: post.players,
-          spectators: post.spectators,
-          sides: post.sides,
-          scores: post.scores,
-          status: post.status,
-          names: post.names,
-          creator: post.creator,
-        });
+        if (post.gone) {
+          this.matches.delete(post.id);
+        } else {
+          this.matches.set(post.id, {
+            id: post.id,
+            players: post.players,
+            spectators: post.spectators,
+            sides: post.sides,
+            scores: post.scores,
+            status: post.status,
+            names: post.names,
+            creator: post.creator,
+          });
+        }
+        await this.store.put("matches", [...this.matches.values()]);
       }
       this.broadcast(this.snapshot());
       return new Response("ok");

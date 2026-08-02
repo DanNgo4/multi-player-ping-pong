@@ -46,7 +46,30 @@ import type { Env } from "./env";
 const LOBBY_ROOM = "index";
 const CHAT_HISTORY_LIMIT = 50;
 
+interface MatchStorage {
+  get(key: string): Promise<unknown>;
+  put(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<unknown>;
+}
+
+/** Everything a hibernated room needs to pick the match back up on wake. */
+interface SavedSession {
+  state: GameState;
+  playerNames: [string, string | null][];
+  watcherNames: [string, string][];
+  creator: string | null;
+  creatorSet: boolean;
+  chatHistory: ChatEntry[];
+}
+
 export class MatchServer extends Server<Env> {
+  /**
+   * Hibernate between messages while idle: rooms sitting on a waiting or
+   * game-over screen with tabs open would otherwise stay pinned in memory
+   * around the clock and burn the Durable Objects duration quota. During
+   * countdown/play the 30 Hz tick interval keeps the room awake anyway.
+   */
+  static override options = { hibernate: true };
   state: GameState = createInitialState();
   /** Display name per seated player, keyed by connection id (=== seat id). */
   playerNames = new Map<string, string | null>();
@@ -75,6 +98,35 @@ export class MatchServer extends Server<Env> {
     return (this as unknown as { env: Env }).env;
   }
 
+  private get store(): MatchStorage {
+    return (this as unknown as { ctx: { storage: MatchStorage } }).ctx.storage;
+  }
+
+  override async onStart(): Promise<void> {
+    // Waking from hibernation: connections survived, memory didn't.
+    const saved = (await this.store.get("session")) as SavedSession | undefined;
+    if (!saved) return;
+    this.state = saved.state;
+    this.playerNames = new Map(saved.playerNames);
+    this.watcherNames = new Map(saved.watcherNames);
+    this.creator = saved.creator;
+    this.creatorSet = saved.creatorSet;
+    this.chatHistory = saved.chatHistory;
+  }
+
+  /** Persists the session so an idle (hibernated) room survives eviction. */
+  private saveSession(): void {
+    const session: SavedSession = {
+      state: this.state,
+      playerNames: [...this.playerNames.entries()],
+      watcherNames: [...this.watcherNames.entries()],
+      creator: this.creator,
+      creatorSet: this.creatorSet,
+      chatHistory: this.chatHistory,
+    };
+    void this.store.put("session", session).catch(() => {});
+  }
+
   override onConnect(conn: Connection, ctx: ConnectionContext): void {
     const params = new URL(ctx.request.url).searchParams;
     const wantsWatch = params.get("intent") === "watch";
@@ -93,8 +145,13 @@ export class MatchServer extends Server<Env> {
     }
     if (!seat) this.watcherNames.set(conn.id, name ?? "Guest");
     this.sendWelcome(conn, seat);
-    this.ensureLoop();
+    // The tick loop only runs while the match needs simulating; idle rooms
+    // stay quiet so they can hibernate.
+    if (this.state.status === "countdown" || this.state.status === "playing") {
+      this.ensureLoop();
+    }
     this.broadcastState();
+    this.saveSession();
     void this.updateLobby();
   }
 
@@ -150,8 +207,12 @@ export class MatchServer extends Server<Env> {
       seat.racket = next;
     } else if (msg.type === "ready" && this.state.status === "waiting") {
       seat.ready = !seat.ready;
-      if (allReady(this.state)) beginCountdown(this.state);
+      if (allReady(this.state)) {
+        beginCountdown(this.state);
+        this.ensureLoop();
+      }
       this.broadcastState();
+      this.saveSession();
       void this.updateLobby();
     } else if (msg.type === "restart" && this.state.status === "gameover") {
       // A rematch starts only once every seated player has pressed it.
@@ -159,8 +220,10 @@ export class MatchServer extends Server<Env> {
       if (allReady(this.state)) {
         resetScores(this.state);
         beginCountdown(this.state);
+        this.ensureLoop();
       }
       this.broadcastState();
+      this.saveSession();
       void this.updateLobby();
     }
   }
@@ -174,6 +237,7 @@ export class MatchServer extends Server<Env> {
     this.watcherNames.delete(conn.id);
     this.sendWelcome(conn, seat);
     this.broadcastState();
+    this.saveSession();
     void this.updateLobby();
   }
 
@@ -193,6 +257,7 @@ export class MatchServer extends Server<Env> {
     }
     this.sendWelcome(conn, null);
     this.broadcastState();
+    this.saveSession();
     void this.updateLobby();
   }
 
@@ -221,6 +286,7 @@ export class MatchServer extends Server<Env> {
     }
     const msg: ServerMessage = { type: "chat", from, text };
     this.broadcast(JSON.stringify(msg));
+    this.saveSession();
   }
 
   override onClose(conn: Connection): void {
@@ -251,9 +317,11 @@ export class MatchServer extends Server<Env> {
       this.chatHistory = [];
       this.lastStateJson = "";
       this.lastMetaJson = "";
+      void this.store.delete("session").catch(() => {});
       void this.updateLobby(true);
     } else {
       this.broadcastState();
+      this.saveSession();
       void this.updateLobby();
     }
   }
@@ -279,6 +347,15 @@ export class MatchServer extends Server<Env> {
     const after = `${this.state.scores[0]}:${this.state.scores[1]}:${this.state.status}`;
     if (before !== after) void this.updateLobby();
     if (!wasOver && this.state.status === "gameover") void this.reportResult();
+    // Simulation over (suspended or game over): stop ticking and persist so
+    // the room can hibernate until the next message wakes it.
+    if (this.state.status !== "countdown" && this.state.status !== "playing") {
+      if (this.loop) {
+        clearInterval(this.loop);
+        this.loop = null;
+      }
+      this.saveSession();
+    }
   }
 
   /** Records a finished game with the lobby for the history list/leaderboard. */
